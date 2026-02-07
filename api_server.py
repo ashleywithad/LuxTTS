@@ -164,16 +164,21 @@ async def create_speech(request: TTSRequest):
     if lux_tts is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
+    print(f"[TTS Request] voice={request.voice}, format={request.response_format}, stream={request.stream}, text_length={len(request.input)}")
+
     # Get voice sample path
     voice_file = VOICE_SAMPLES_DIR / f"{request.voice}.wav"
     if not voice_file.exists():
         # Try mp3
         voice_file = VOICE_SAMPLES_DIR / f"{request.voice}.mp3"
         if not voice_file.exists():
+            print(f"[TTS Error] Voice file not found: {voice_file}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Voice '{request.voice}' not found. Place your audio file in voice_samples/ as {request.voice}.wav or {request.voice}.mp3"
             )
+
+    print(f"[TTS] Using voice file: {voice_file}")
 
     # If streaming is requested, use streaming response
     if request.stream:
@@ -181,6 +186,7 @@ async def create_speech(request: TTSRequest):
 
     try:
         # Encode the prompt audio
+        print(f"[TTS] Encoding prompt audio...")
         encoded_prompt = lux_tts.encode_prompt(
             str(voice_file),
             rms=request.rms,
@@ -188,6 +194,7 @@ async def create_speech(request: TTSRequest):
         )
 
         # Generate speech
+        print(f"[TTS] Generating speech...")
         audio = lux_tts.generate_speech(
             text=request.input,
             encode_dict=encoded_prompt,
@@ -199,11 +206,13 @@ async def create_speech(request: TTSRequest):
 
         # Convert to numpy array
         audio_numpy = audio.numpy().squeeze()
+        print(f"[TTS] Generated audio shape: {audio_numpy.shape}")
 
         # Return based on format
         if request.response_format == "wav":
             with io.BytesIO() as buffer:
                 sf.write(buffer, audio_numpy, 48000, format="WAV")
+                print(f"[TTS] Returning WAV audio: {len(buffer.getvalue())} bytes")
                 return Response(content=buffer.getvalue(), media_type="audio/wav")
         elif request.response_format == "mp3":
             # For mp3, we'll use pydub to convert
@@ -215,14 +224,28 @@ async def create_speech(request: TTSRequest):
                     audio_segment.export(buffer, format="mp3")
                     mp3_data = buffer.getvalue()
                 os.unlink(temp_wav.name)
+                print(f"[TTS] Returning MP3 audio: {len(mp3_data)} bytes")
                 return Response(content=mp3_data, media_type="audio/mpeg")
         else:  # pcm
             with io.BytesIO() as buffer:
                 sf.write(buffer, audio_numpy, 48000, format="RAW", subtype="PCM_16")
+                print(f"[TTS] Returning PCM audio: {len(buffer.getvalue())} bytes")
                 return Response(content=buffer.getvalue(), media_type="audio/pcm")
 
+    except HTTPException:
+        raise
     except Exception as e:
+        import traceback
+        print(f"[TTS Error] {str(e)}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
+
+
+# Alias endpoint for Open WebUI compatibility (some clients expect /audio/speech)
+@app.post("/audio/speech")
+async def create_speech_alias(request: TTSRequest):
+    """Alias endpoint for /v1/audio/speech - redirects to main endpoint"""
+    return await create_speech(request)
 
 
 @app.post("/v1/audio/speech/stream")
@@ -389,6 +412,13 @@ async def create_speech_stream(request: TTSRequest):
         audio_generator(),
         media_type="audio/wav" if request.response_format == "wav" else "audio/mpeg" if request.response_format == "mp3" else "audio/pcm"
     )
+
+
+# Alias streaming endpoint for Open WebUI compatibility
+@app.post("/audio/speech/stream")
+async def create_speech_stream_alias(request: TTSRequest):
+    """Alias endpoint for /v1/audio/speech/stream - redirects to main streaming endpoint"""
+    return await create_speech_stream(request)
 
 
 @app.exception_handler(Exception)
