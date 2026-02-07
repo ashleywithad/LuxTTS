@@ -5,9 +5,16 @@ This server provides an OpenAI-compatible TTS API using LuxTTS.
 It follows the OpenAI API specification for text-to-speech.
 
 API Endpoints:
-- POST /v1/audio/speech - Generate speech from text (OpenAI compatible)
+- POST /v1/audio/speech - Generate speech from text (OpenAI compatible, supports stream parameter)
+- POST /v1/audio/speech/stream - Explicit streaming endpoint
 - GET /v1/models - List available models (OpenAI compatible)
+- GET /v1/voices - List available voice presets
 - GET /health - Health check endpoint
+- GET / - Web UI
+
+Streaming Support:
+- Set stream=true in the request body for streaming response
+- Compatible with Open WebUI and other OpenAI-compatible clients
 """
 
 import os
@@ -22,11 +29,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response, JSONResponse, FileResponse
+from fastapi.responses import Response, JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import torch
 import soundfile as sf
+import numpy as np
 
 from zipvoice.luxvoice import LuxTTS
 
@@ -84,6 +92,7 @@ class TTSRequest(BaseModel):
     voice: str = Field(default="default", description="Voice preset to use")
     response_format: Literal["mp3", "wav", "pcm"] = Field(default="mp3", description="Audio format")
     speed: float = Field(default=1.0, ge=0.25, le=4.0, description="Speed of audio")
+    stream: bool = Field(default=False, description="Enable streaming response (for compatibility)")
 
     # LuxTTS specific parameters (optional)
     rms: float = Field(default=0.01, ge=0.0, le=1.0, description="Audio volume (RMS)")
@@ -149,6 +158,8 @@ async def create_speech(request: TTSRequest):
 
     This endpoint follows the OpenAI TTS API specification:
     https://platform.openai.com/docs/api-reference/audio/createSpeech
+
+    Set stream=true for streaming response (compatible with Open WebUI).
     """
     if lux_tts is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -163,6 +174,10 @@ async def create_speech(request: TTSRequest):
                 status_code=400,
                 detail=f"Voice '{request.voice}' not found. Place your audio file in voice_samples/ as {request.voice}.wav or {request.voice}.mp3"
             )
+
+    # If streaming is requested, use streaming response
+    if request.stream:
+        return await create_speech_stream(request)
 
     try:
         # Encode the prompt audio
@@ -208,6 +223,172 @@ async def create_speech(request: TTSRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
+
+
+@app.post("/v1/audio/speech/stream")
+async def create_speech_stream(request: TTSRequest):
+    """
+    Generate speech with streaming response (explicit streaming endpoint)
+
+    This endpoint streams audio in chunks, allowing clients to start playback
+    before the entire audio is generated. Note: LuxTTS generates the full audio
+    internally, then chunks it for streaming.
+
+    You can also use the main /v1/audio/speech endpoint with stream=true parameter.
+    """
+    if lux_tts is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    # Get voice sample path
+    voice_file = VOICE_SAMPLES_DIR / f"{request.voice}.wav"
+    if not voice_file.exists():
+        voice_file = VOICE_SAMPLES_DIR / f"{request.voice}.mp3"
+        if not voice_file.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Voice '{request.voice}' not found. Place your audio file in voice_samples/ as {request.voice}.wav or {request.voice}.mp3"
+            )
+
+    async def audio_generator():
+        """Generate audio and yield it in chunks"""
+        try:
+            # Encode the prompt audio
+            encoded_prompt = lux_tts.encode_prompt(
+                str(voice_file),
+                rms=request.rms,
+                duration=request.ref_duration
+            )
+
+            # Generate speech
+            audio = lux_tts.generate_speech(
+                text=request.input,
+                encode_dict=encoded_prompt,
+                num_steps=request.num_steps,
+                t_shift=request.t_shift,
+                speed=request.speed,
+                return_smooth=request.return_smooth
+            )
+
+            # Convert to numpy array
+            audio_numpy = audio.numpy().squeeze()
+
+            # Determine media type and format
+            if request.response_format == "wav":
+                media_type = "audio/wav"
+                with io.BytesIO() as buffer:
+                    sf.write(buffer, audio_numpy, 48000, format="WAV")
+                    audio_data = buffer.getvalue()
+            elif request.response_format == "mp3":
+                from pydub import AudioSegment
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                    sf.write(temp_wav.name, audio_numpy, 48000, format="WAV")
+                    audio_segment = AudioSegment.from_wav(temp_wav.name)
+                    with io.BytesIO() as buffer:
+                        audio_segment.export(buffer, format="mp3")
+                        audio_data = buffer.getvalue()
+                    os.unlink(temp_wav.name)
+                media_type = "audio/mpeg"
+            else:  # pcm
+                media_type = "audio/pcm"
+                with io.BytesIO() as buffer:
+                    sf.write(buffer, audio_numpy, 48000, format="RAW", subtype="PCM_16")
+                    audio_data = buffer.getvalue()
+
+            # Stream in chunks (8KB chunks for smooth playback)
+            chunk_size = 8192
+            for i in range(0, len(audio_data), chunk_size):
+                chunk = audio_data[i:i + chunk_size]
+                yield chunk
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
+
+    return StreamingResponse(
+        audio_generator(),
+        media_type="audio/wav" if request.response_format == "wav" else "audio/mpeg" if request.response_format == "mp3" else "audio/pcm"
+    )
+
+
+@app.post("/v1/audio/speech/stream")
+async def create_speech_stream(request: TTSRequest):
+    """
+    Generate speech with streaming response (for Open WebUI compatibility)
+
+    This endpoint streams audio in chunks, allowing clients to start playback
+    before the entire audio is generated. Note: LuxTTS generates the full audio
+    internally, then chunks it for streaming.
+    """
+    if lux_tts is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    # Get voice sample path
+    voice_file = VOICE_SAMPLES_DIR / f"{request.voice}.wav"
+    if not voice_file.exists():
+        voice_file = VOICE_SAMPLES_DIR / f"{request.voice}.mp3"
+        if not voice_file.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Voice '{request.voice}' not found. Place your audio file in voice_samples/ as {request.voice}.wav or {request.voice}.mp3"
+            )
+
+    async def audio_generator():
+        """Generate audio and yield it in chunks"""
+        try:
+            # Encode the prompt audio
+            encoded_prompt = lux_tts.encode_prompt(
+                str(voice_file),
+                rms=request.rms,
+                duration=request.ref_duration
+            )
+
+            # Generate speech
+            audio = lux_tts.generate_speech(
+                text=request.input,
+                encode_dict=encoded_prompt,
+                num_steps=request.num_steps,
+                t_shift=request.t_shift,
+                speed=request.speed,
+                return_smooth=request.return_smooth
+            )
+
+            # Convert to numpy array
+            audio_numpy = audio.numpy().squeeze()
+
+            # Determine media type and format
+            if request.response_format == "wav":
+                media_type = "audio/wav"
+                with io.BytesIO() as buffer:
+                    sf.write(buffer, audio_numpy, 48000, format="WAV")
+                    audio_data = buffer.getvalue()
+            elif request.response_format == "mp3":
+                from pydub import AudioSegment
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                    sf.write(temp_wav.name, audio_numpy, 48000, format="WAV")
+                    audio_segment = AudioSegment.from_wav(temp_wav.name)
+                    with io.BytesIO() as buffer:
+                        audio_segment.export(buffer, format="mp3")
+                        audio_data = buffer.getvalue()
+                    os.unlink(temp_wav.name)
+                media_type = "audio/mpeg"
+            else:  # pcm
+                media_type = "audio/pcm"
+                with io.BytesIO() as buffer:
+                    sf.write(buffer, audio_numpy, 48000, format="RAW", subtype="PCM_16")
+                    audio_data = buffer.getvalue()
+
+            # Stream in chunks (simulated streaming)
+            chunk_size = 8192  # 8KB chunks
+            for i in range(0, len(audio_data), chunk_size):
+                chunk = audio_data[i:i + chunk_size]
+                yield chunk
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
+
+    return StreamingResponse(
+        audio_generator(),
+        media_type="audio/wav" if request.response_format == "wav" else "audio/mpeg" if request.response_format == "mp3" else "audio/pcm"
+    )
 
 
 @app.exception_handler(Exception)

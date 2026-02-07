@@ -47,6 +47,10 @@
             border-radius: 10px;
             margin-bottom: 30px;
             font-weight: 500;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
         }
 
         .status.online {
@@ -59,6 +63,26 @@
             background: rgba(239, 68, 68, 0.2);
             border: 1px solid #ef4444;
             color: #ef4444;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .status.online .status-dot {
+            background: #22c55e;
+        }
+
+        .status.offline .status-dot {
+            background: #ef4444;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
         }
 
         .main-content {
@@ -85,6 +109,9 @@
             font-size: 1.3em;
             margin-bottom: 20px;
             color: #00d4ff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
 
         .form-group {
@@ -116,6 +143,16 @@
         select:focus {
             outline: none;
             border-color: #00d4ff;
+        }
+
+        /* Custom select dropdown styling */
+        select {
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2300d4ff' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 15px center;
+            padding-right: 40px;
         }
 
         textarea {
@@ -254,32 +291,33 @@
             border: 1px solid rgba(255, 255, 255, 0.2);
         }
 
-        .voices-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-            gap: 10px;
-            margin-top: 10px;
+        .voice-select-wrapper {
+            position: relative;
         }
 
-        .voice-btn {
-            padding: 10px;
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            color: #a0a0a0;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .voice-btn:hover {
-            background: rgba(255, 255, 255, 0.1);
-            border-color: #00d4ff;
-        }
-
-        .voice-btn.active {
-            background: rgba(0, 212, 255, 0.2);
-            border-color: #00d4ff;
+        .voice-count {
+            font-size: 0.8em;
             color: #00d4ff;
+            margin-top: 5px;
+        }
+
+        .refresh-voices {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: #00d4ff;
+            cursor: pointer;
+            padding: 5px;
+            width: auto;
+            font-size: 1.2em;
+        }
+
+        .refresh-voices:hover {
+            color: #7c3aed;
+            transform: translateY(-50%) rotate(180deg);
         }
 
         .info-box {
@@ -331,6 +369,12 @@
             grid-template-columns: 1fr 1fr;
             gap: 15px;
         }
+
+        .voice-dropdown-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
     </style>
 </head>
 <body>
@@ -341,7 +385,8 @@
         </div>
 
         <div id="status" class="status offline">
-            Checking server status...
+            <div class="status-dot"></div>
+            <span>Checking server status...</span>
         </div>
 
         <div class="main-content">
@@ -354,9 +399,14 @@
                 </div>
 
                 <div class="form-group">
-                    <label>Voice Selection:</label>
-                    <input type="text" id="voiceInput" value="default" placeholder="Voice name (default)">
-                    <div class="voices-grid" id="voicesGrid"></div>
+                    <label for="voiceSelect">Voice Selection:</label>
+                    <div class="voice-select-wrapper">
+                        <select id="voiceSelect">
+                            <option value="default" selected>default</option>
+                        </select>
+                        <button class="refresh-voices" onclick="loadVoices()" title="Refresh voices">🔄</button>
+                    </div>
+                    <div class="voice-count" id="voiceCount">Loading voices...</div>
                 </div>
 
                 <div class="form-group">
@@ -392,7 +442,7 @@
 
                 <div class="advanced-settings">
                     <div class="advanced-toggle" onclick="toggleAdvanced()">
-                        <span>▶️</span>
+                        <span id="advancedIcon">▶️</span>
                         <span>Advanced Settings</span>
                     </div>
                     <div class="advanced-settings-content" id="advancedContent">
@@ -455,7 +505,17 @@
                     <p>
                         • <a href="/docs" style="color: #00d4ff;">/docs</a> - Interactive API documentation<br>
                         • <a href="/v1/models" style="color: #00d4ff;">/v1/models</a> - List available models<br>
+                        • <a href="/v1/voices" style="color: #00d4ff;">/v1/voices</a> - List available voices<br>
                         • <a href="/health" style="color: #00d4ff;">/health</a> - Health check
+                    </p>
+                </div>
+
+                <div class="info-box">
+                    <h3>🌐 Open WebUI Settings</h3>
+                    <p>
+                        <strong>Base URL:</strong> http://localhost:8000<br>
+                        <strong>TTS Model:</strong> luxtts<br>
+                        <strong>Voice:</strong> (name from dropdown above)
                     </p>
                 </div>
             </div>
@@ -465,6 +525,7 @@
     <script>
         const API_BASE = window.location.origin;
         let audioBlob = null;
+        let availableVoices = [];
 
         // Check server status
         async function checkStatus() {
@@ -472,36 +533,68 @@
                 const response = await fetch(`${API_BASE}/health`);
                 if (response.ok) {
                     const data = await response.json();
-                    document.getElementById('status').className = 'status online';
-                    document.getElementById('status').textContent = `✅ Server Online - Model: ${data.model_loaded ? 'Loaded' : 'Loading...'}`;
+                    const statusEl = document.getElementById('status');
+                    statusEl.className = 'status online';
+                    statusEl.innerHTML = '<div class="status-dot"></div><span>✅ Server Online - Model: ' + (data.model_loaded ? 'Loaded' : 'Loading...') + '</span>';
                 } else {
                     throw new Error('Server not responding');
                 }
             } catch (error) {
-                document.getElementById('status').className = 'status offline';
-                document.getElementById('status').textContent = '❌ Server Offline - Make sure the API server is running';
+                const statusEl = document.getElementById('status');
+                statusEl.className = 'status offline';
+                statusEl.innerHTML = '<div class="status-dot"></div><span>❌ Server Offline - Make sure the API server is running</span>';
             }
         }
 
-        // Load available voices
+        // Load available voices from server
         async function loadVoices() {
-            // Try to fetch voice list from a hypothetical endpoint
-            const commonVoices = ['default', 'female', 'male', 'child', 'elderly'];
-            const grid = document.getElementById('voicesGrid');
-            grid.innerHTML = '';
-            commonVoices.forEach(voice => {
-                const btn = document.createElement('button');
-                btn.className = 'voice-btn';
-                btn.textContent = voice;
-                btn.onclick = () => selectVoice(voice);
-                grid.appendChild(btn);
-            });
-        }
+            const voiceSelect = document.getElementById('voiceSelect');
+            const voiceCount = document.getElementById('voiceCount');
+            const refreshBtn = document.querySelector('.refresh-voices');
 
-        function selectVoice(voice) {
-            document.getElementById('voiceInput').value = voice;
-            document.querySelectorAll('.voice-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            refreshBtn.disabled = true;
+            voiceCount.textContent = 'Loading voices...';
+
+            try {
+                const response = await fetch(`${API_BASE}/v1/voices`);
+                if (response.ok) {
+                    const data = await response.json();
+                    availableVoices = data.voices || [];
+
+                    // Save current selection
+                    const currentSelection = voiceSelect.value;
+
+                    // Clear and repopulate select
+                    voiceSelect.innerHTML = '';
+                    if (availableVoices.length === 0) {
+                        voiceSelect.innerHTML = '<option value="default" selected>default (no voices found)</option>';
+                        voiceCount.textContent = '⚠️ No voices found in voice_samples/';
+                    } else {
+                        availableVoices.forEach(voice => {
+                            const option = document.createElement('option');
+                            option.value = voice;
+                            option.textContent = voice;
+                            voiceSelect.appendChild(option);
+                        });
+
+                        // Restore selection if it still exists, otherwise select first
+                        if (availableVoices.includes(currentSelection)) {
+                            voiceSelect.value = currentSelection;
+                        } else {
+                            voiceSelect.value = availableVoices[0];
+                        }
+
+                        voiceCount.textContent = `✅ Found ${availableVoices.length} voice${availableVoices.length > 1 ? 's' : ''}`;
+                    }
+                } else {
+                    throw new Error('Failed to load voices');
+                }
+            } catch (error) {
+                voiceSelect.innerHTML = '<option value="default" selected>default (offline)</option>';
+                voiceCount.textContent = '⚠️ Could not load voices from server';
+            } finally {
+                refreshBtn.disabled = false;
+            }
         }
 
         function updateSlider(type) {
@@ -518,7 +611,9 @@
 
         function toggleAdvanced() {
             const content = document.getElementById('advancedContent');
+            const icon = document.getElementById('advancedIcon');
             content.classList.toggle('show');
+            icon.textContent = content.classList.contains('show') ? '▼' : '▶️';
         }
 
         async function generateSpeech() {
@@ -541,7 +636,7 @@
                 const requestBody = {
                     model: 'luxtts',
                     input: text,
-                    voice: document.getElementById('voiceInput').value || 'default',
+                    voice: document.getElementById('voiceSelect').value || 'default',
                     response_format: document.getElementById('formatSelect').value,
                     speed: parseFloat(document.getElementById('speedSlider').value),
                     rms: parseFloat(document.getElementById('rmsSlider').value),
@@ -591,6 +686,7 @@
         checkStatus();
         loadVoices();
         setInterval(checkStatus, 30000); // Check status every 30 seconds
+        setInterval(loadVoices, 60000); // Refresh voices every minute
     </script>
 </body>
 </html>

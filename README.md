@@ -141,6 +141,40 @@ with open("output.wav", "wb") as f:
     f.write(response.content)
 ```
 
+**Streaming Support**:
+Set `stream: true` in your request for streaming audio (compatible with Open WebUI):
+```python
+response = requests.post(
+    "http://localhost:8000/v1/audio/speech",
+    json={
+        "model": "luxtts",
+        "input": "Hello, world!",
+        "voice": "default",
+        "response_format": "wav",
+        "stream": true
+    },
+    stream=True
+)
+
+with open("output.wav", "wb") as f:
+    for chunk in response.iter_content(chunk_size=8192):
+        f.write(chunk)
+```
+
+response = requests.post(
+    "http://localhost:8000/v1/audio/speech",
+    json={
+        "model": "luxtts",
+        "input": "Hello, world!",
+        "voice": "default",
+        "response_format": "wav"
+    }
+)
+
+with open("output.wav", "wb") as f:
+    f.write(response.content)
+```
+
 ### List Models
 
 **Endpoint**: `GET /v1/models`
@@ -158,6 +192,7 @@ curl http://localhost:8000/v1/models
 | `voice` | string | "default" | Voice preset to use (filename without extension from `voice_samples/`) |
 | `response_format` | string | "mp3" | Audio format: "mp3", "wav", or "pcm" |
 | `speed` | float | 1.0 | Speed of audio (0.25 to 4.0) |
+| `stream` | bool | false | Enable streaming response (for Open WebUI) |
 | `rms` | float | 0.01 | Audio volume/RMS (0.0 to 1.0) |
 | `t_shift` | float | 0.9 | Sampling temperature (0.0 to 1.0) |
 | `num_steps` | int | 4 | Number of sampling steps (1 to 10) |
