@@ -215,17 +215,27 @@ async def create_speech(request: TTSRequest):
                 print(f"[TTS] Returning WAV audio: {len(buffer.getvalue())} bytes")
                 return Response(content=buffer.getvalue(), media_type="audio/wav")
         elif request.response_format == "mp3":
-            # For mp3, we'll use pydub to convert
+            # For mp3, we'll use pydub to convert (in-memory to avoid file locking issues)
             from pydub import AudioSegment
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                sf.write(temp_wav.name, audio_numpy, 48000, format="WAV")
-                audio_segment = AudioSegment.from_wav(temp_wav.name)
-                with io.BytesIO() as buffer:
-                    audio_segment.export(buffer, format="mp3")
-                    mp3_data = buffer.getvalue()
-                os.unlink(temp_wav.name)
+            try:
+                # Write WAV to memory first
+                with io.BytesIO() as wav_buffer:
+                    sf.write(wav_buffer, audio_numpy, 48000, format="WAV")
+                    wav_data = wav_buffer.getvalue()
+
+                # Create AudioSegment from WAV data in memory
+                audio_segment = AudioSegment.from_wav(io.BytesIO(wav_data))
+
+                # Export to MP3 in memory
+                with io.BytesIO() as mp3_buffer:
+                    audio_segment.export(mp3_buffer, format="mp3")
+                    mp3_data = mp3_buffer.getvalue()
+
                 print(f"[TTS] Returning MP3 audio: {len(mp3_data)} bytes")
                 return Response(content=mp3_data, media_type="audio/mpeg")
+            except Exception as e:
+                print(f"[TTS Error] MP3 conversion failed: {e}")
+                raise HTTPException(status_code=500, detail=f"MP3 conversion failed: {str(e)}")
         else:  # pcm
             with io.BytesIO() as buffer:
                 sf.write(buffer, audio_numpy, 48000, format="RAW", subtype="PCM_16")
@@ -303,13 +313,16 @@ async def create_speech_stream(request: TTSRequest):
                     audio_data = buffer.getvalue()
             elif request.response_format == "mp3":
                 from pydub import AudioSegment
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                    sf.write(temp_wav.name, audio_numpy, 48000, format="WAV")
-                    audio_segment = AudioSegment.from_wav(temp_wav.name)
-                    with io.BytesIO() as buffer:
-                        audio_segment.export(buffer, format="mp3")
-                        audio_data = buffer.getvalue()
-                    os.unlink(temp_wav.name)
+                # Write WAV to memory first
+                with io.BytesIO() as wav_buffer:
+                    sf.write(wav_buffer, audio_numpy, 48000, format="WAV")
+                    wav_data = wav_buffer.getvalue()
+                # Create AudioSegment from WAV data in memory
+                audio_segment = AudioSegment.from_wav(io.BytesIO(wav_data))
+                # Export to MP3 in memory
+                with io.BytesIO() as buffer:
+                    audio_segment.export(buffer, format="mp3")
+                    audio_data = buffer.getvalue()
                 media_type = "audio/mpeg"
             else:  # pcm
                 media_type = "audio/pcm"
@@ -385,13 +398,16 @@ async def create_speech_stream(request: TTSRequest):
                     audio_data = buffer.getvalue()
             elif request.response_format == "mp3":
                 from pydub import AudioSegment
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                    sf.write(temp_wav.name, audio_numpy, 48000, format="WAV")
-                    audio_segment = AudioSegment.from_wav(temp_wav.name)
-                    with io.BytesIO() as buffer:
-                        audio_segment.export(buffer, format="mp3")
-                        audio_data = buffer.getvalue()
-                    os.unlink(temp_wav.name)
+                # Write WAV to memory first
+                with io.BytesIO() as wav_buffer:
+                    sf.write(wav_buffer, audio_numpy, 48000, format="WAV")
+                    wav_data = wav_buffer.getvalue()
+                # Create AudioSegment from WAV data in memory
+                audio_segment = AudioSegment.from_wav(io.BytesIO(wav_data))
+                # Export to MP3 in memory
+                with io.BytesIO() as buffer:
+                    audio_segment.export(buffer, format="mp3")
+                    audio_data = buffer.getvalue()
                 media_type = "audio/mpeg"
             else:  # pcm
                 media_type = "audio/pcm"
