@@ -77,7 +77,9 @@ The API will be available at `http://localhost:8000`
 The web interface provides:
 
 - **Text Input** - Enter any text you want to convert to speech
-- **Voice Selection** - Choose from available voice presets or enter custom voice name
+- **Dynamic Voice Dropdown** - Automatically detects and lists all voices from `voice_samples/` folder
+  - 🔄 Refresh button to reload voices
+  - Voice count indicator showing available voices
 - **Real-time Controls**:
   - Speed slider (0.25x - 4x)
   - Volume (RMS) control
@@ -87,7 +89,8 @@ The web interface provides:
   - Smooth audio toggle
 - **Audio Player** - Listen to generated speech directly in the browser
 - **Download** - Save generated audio as WAV, MP3, or PCM
-- **Server Status** - Real-time health check indicator
+- **Server Status** - Real-time health check with animated indicator
+- **Open WebUI Settings** - Quick reference for connecting Open WebUI
 
 **Float16 vs Float32**:
 - **Float32** (default): Best quality, standard precision
@@ -181,6 +184,23 @@ with open("output.wav", "wb") as f:
 
 ```bash
 curl http://localhost:8000/v1/models
+```
+
+### List Available Voices
+
+**Endpoint**: `GET /v1/voices`
+
+Returns a list of all available voice presets found in the `voice_samples/` directory.
+
+```bash
+curl http://localhost:8000/v1/voices
+```
+
+**Response:**
+```json
+{
+  "voices": ["default", "female", "male"]
+}
 ```
 
 ## API Parameters
