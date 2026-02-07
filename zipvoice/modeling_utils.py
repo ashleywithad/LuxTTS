@@ -61,11 +61,15 @@ def process_audio(audio, transcriber, tokenizer, feature_extractor, device, targ
     prompt_tokens = tokenizer.texts_to_token_ids([prompt_text])
     return prompt_tokens, prompt_features_lens, prompt_features, prompt_rms
 
-def generate(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, text, model, vocoder, tokenizer, num_step=4, guidance_scale=3.0, speed=1.0, t_shift=0.5, target_rms=0.1):
+def generate(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, text, model, vocoder, tokenizer, num_step=4, guidance_scale=3.0, speed=1.0, t_shift=0.5, target_rms=0.1, dtype="float32"):
     tokens = tokenizer.texts_to_token_ids([text])
     device = next(model.parameters()).device  # Auto-detect device
 
     speed = speed * 1.3
+
+    # Convert to float16 if model is in float16
+    if dtype == "float16":
+        prompt_features = prompt_features.half()
 
     with torch.inference_mode():
         (pred_features, _, _, _) = model.sample(
@@ -90,7 +94,7 @@ def generate(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, t
 
     return wav
 
-def load_models_gpu(model_path=None, device="cuda"):
+def load_models_gpu(model_path=None, device="cuda", dtype="float32"):
     params = LuxTTSConfig()
     if model_path is None:
         model_path = snapshot_download("YatharthS/LuxTTS")
@@ -114,9 +118,20 @@ def load_models_gpu(model_path=None, device="cuda"):
     params.device = torch.device(device, 0)
 
     model = model.to(params.device).eval()
+
+    # Convert to float16 if requested
+    if dtype == "float16":
+        model = model.half()
+        print("Model converted to float16 for faster inference")
+
     feature_extractor = VocosFbank()
 
     vocos = Vocos.from_hparams(f'{model_path}/vocoder/config.yaml').to(device)
+
+    # Also convert vocoder to float16 if requested
+    if dtype == "float16":
+        vocos = vocos.half()
+        print("Vocoder converted to float16")
     parametrize.remove_parametrizations(vocos.upsampler.upsample_layers[0], "weight")
     parametrize.remove_parametrizations(vocos.upsampler.upsample_layers[1], "weight")
     vocos.load_state_dict(torch.load(f'{model_path}/vocoder/vocos.bin', map_location=params.device))

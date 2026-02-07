@@ -23,3 +23,12 @@ jieba
 piper_phonemize
 pypinyin
 setuptools<81
+
+# Configuration
+python-dotenv
+
+# API Server
+fastapi
+uvicorn[standard]
+python-multipart
+soundfile

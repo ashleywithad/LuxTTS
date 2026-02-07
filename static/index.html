@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LuxTTS - OpenAI-Compatible TTS Server</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #e0e0e0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #a0a0a0;
+        }
+
+        .status {
+            text-align: center;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            font-weight: 500;
+        }
+
+        .status.online {
+            background: rgba(34, 197, 94, 0.2);
+            border: 1px solid #22c55e;
+            color: #22c55e;
+        }
+
+        .status.offline {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid #ef4444;
+            color: #ef4444;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+
+        @media (max-width: 900px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+        }
+
+        .panel h2 {
+            font-size: 1.3em;
+            margin-bottom: 20px;
+            color: #00d4ff;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #a0a0a0;
+            font-size: 0.9em;
+        }
+
+        input[type="text"],
+        textarea,
+        select {
+            width: 100%;
+            padding: 12px 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            color: #e0e0e0;
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        textarea:focus,
+        select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+            font-family: inherit;
+        }
+
+        .slider-group {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        input[type="range"] {
+            flex: 1;
+            -webkit-appearance: none;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            background: #00d4ff;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .slider-value {
+            min-width: 50px;
+            text-align: center;
+            color: #00d4ff;
+            font-weight: 500;
+        }
+
+        .toggle-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .toggle {
+            position: relative;
+            width: 50px;
+            height: 26px;
+        }
+
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 13px;
+            transition: 0.3s;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 3px;
+            bottom: 3px;
+            background: white;
+            border-radius: 50%;
+            transition: 0.3s;
+        }
+
+        .toggle input:checked + .toggle-slider {
+            background: #00d4ff;
+        }
+
+        .toggle input:checked + .toggle-slider:before {
+            transform: translateX(24px);
+        }
+
+        button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(0, 212, 255, 0.3);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.loading {
+            background: linear-gradient(90deg, #666, #888);
+        }
+
+        .audio-player {
+            margin-top: 20px;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            display: none;
+        }
+
+        .audio-player.show {
+            display: block;
+        }
+
+        .audio-player audio {
+            width: 100%;
+        }
+
+        .download-btn {
+            margin-top: 10px;
+            padding: 10px 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .voices-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .voice-btn {
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            color: #a0a0a0;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .voice-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: #00d4ff;
+        }
+
+        .voice-btn.active {
+            background: rgba(0, 212, 255, 0.2);
+            border-color: #00d4ff;
+            color: #00d4ff;
+        }
+
+        .info-box {
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .info-box h3 {
+            color: #00d4ff;
+            margin-bottom: 10px;
+            font-size: 1em;
+        }
+
+        .info-box p {
+            font-size: 0.9em;
+            color: #a0a0a0;
+            line-height: 1.5;
+        }
+
+        .advanced-settings {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .advanced-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            color: #a0a0a0;
+            user-select: none;
+        }
+
+        .advanced-settings-content {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .advanced-settings-content.show {
+            display: block;
+        }
+
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎙️ LuxTTS Web UI</h1>
+            <p>OpenAI-Compatible Text-to-Speech Server</p>
+        </div>
+
+        <div id="status" class="status offline">
+            Checking server status...
+        </div>
+
+        <div class="main-content">
+            <div class="panel">
+                <h2>📝 Text Input</h2>
+
+                <div class="form-group">
+                    <label for="textInput">Enter your text:</label>
+                    <textarea id="textInput" placeholder="Type or paste the text you want to convert to speech...">Hello, this is a test of the LuxTTS text-to-speech system!</textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>Voice Selection:</label>
+                    <input type="text" id="voiceInput" value="default" placeholder="Voice name (default)">
+                    <div class="voices-grid" id="voicesGrid"></div>
+                </div>
+
+                <div class="form-group">
+                    <label>Response Format:</label>
+                    <select id="formatSelect">
+                        <option value="wav">WAV (Best Quality)</option>
+                        <option value="mp3">MP3 (Smaller Size)</option>
+                        <option value="pcm">PCM (Raw Audio)</option>
+                    </select>
+                </div>
+
+                <button id="generateBtn" onclick="generateSpeech()">
+                    🔊 Generate Speech
+                </button>
+
+                <div class="audio-player" id="audioPlayer">
+                    <audio id="audio" controls></audio>
+                    <button class="download-btn" onclick="downloadAudio()">
+                        💾 Download
+                    </button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>⚙️ Settings</h2>
+
+                <div class="form-group">
+                    <label>Speed: <span id="speedValue" class="slider-value">1.0</span></label>
+                    <div class="slider-group">
+                        <input type="range" id="speedSlider" min="0.25" max="4" step="0.05" value="1" oninput="updateSlider('speed')">
+                    </div>
+                </div>
+
+                <div class="advanced-settings">
+                    <div class="advanced-toggle" onclick="toggleAdvanced()">
+                        <span>▶️</span>
+                        <span>Advanced Settings</span>
+                    </div>
+                    <div class="advanced-settings-content" id="advancedContent">
+                        <div class="form-group">
+                            <label>RMS (Volume): <span id="rmsValue" class="slider-value">0.01</span></label>
+                            <div class="slider-group">
+                                <input type="range" id="rmsSlider" min="0" max="0.1" step="0.001" value="0.01" oninput="updateSlider('rms')">
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="form-group">
+                                <label>Sampling Steps: <span id="stepsValue" class="slider-value">4</span></label>
+                                <div class="slider-group">
+                                    <input type="range" id="stepsSlider" min="1" max="10" step="1" value="4" oninput="updateSlider('steps')">
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Temperature: <span id="tempValue" class="slider-value">0.9</span></label>
+                                <div class="slider-group">
+                                    <input type="range" id="tempSlider" min="0" max="1" step="0.05" value="0.9" oninput="updateSlider('temp')">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="form-group">
+                                <label>Ref Duration: <span id="refValue" class="slider-value">5</span>s</label>
+                                <div class="slider-group">
+                                    <input type="range" id="refSlider" min="1" max="10" step="1" value="5" oninput="updateSlider('ref')">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <div class="toggle-group">
+                                <label class="toggle">
+                                    <input type="checkbox" id="smoothToggle">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                                <span>Return Smooth Audio</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="info-box">
+                    <h3>💡 Tips</h3>
+                    <p>
+                        • Use at least 3 seconds of audio for voice cloning<br>
+                        • Lower temperature = fewer errors but less expression<br>
+                        • More steps = better quality but slower<br>
+                        • Enable "Smooth" if you hear metallic sounds
+                    </p>
+                </div>
+
+                <div class="info-box">
+                    <h3>🔗 API Endpoints</h3>
+                    <p>
+                        • <a href="/docs" style="color: #00d4ff;">/docs</a> - Interactive API documentation<br>
+                        • <a href="/v1/models" style="color: #00d4ff;">/v1/models</a> - List available models<br>
+                        • <a href="/health" style="color: #00d4ff;">/health</a> - Health check
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        let audioBlob = null;
+
+        // Check server status
+        async function checkStatus() {
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    document.getElementById('status').className = 'status online';
+                    document.getElementById('status').textContent = `✅ Server Online - Model: ${data.model_loaded ? 'Loaded' : 'Loading...'}`;
+                } else {
+                    throw new Error('Server not responding');
+                }
+            } catch (error) {
+                document.getElementById('status').className = 'status offline';
+                document.getElementById('status').textContent = '❌ Server Offline - Make sure the API server is running';
+            }
+        }
+
+        // Load available voices
+        async function loadVoices() {
+            // Try to fetch voice list from a hypothetical endpoint
+            const commonVoices = ['default', 'female', 'male', 'child', 'elderly'];
+            const grid = document.getElementById('voicesGrid');
+            grid.innerHTML = '';
+            commonVoices.forEach(voice => {
+                const btn = document.createElement('button');
+                btn.className = 'voice-btn';
+                btn.textContent = voice;
+                btn.onclick = () => selectVoice(voice);
+                grid.appendChild(btn);
+            });
+        }
+
+        function selectVoice(voice) {
+            document.getElementById('voiceInput').value = voice;
+            document.querySelectorAll('.voice-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+        }
+
+        function updateSlider(type) {
+            const sliders = {
+                'speed': { id: 'speedSlider', valueId: 'speedValue', factor: 1 },
+                'rms': { id: 'rmsSlider', valueId: 'rmsValue', factor: 1 },
+                'steps': { id: 'stepsSlider', valueId: 'stepsValue', factor: 1 },
+                'temp': { id: 'tempSlider', valueId: 'tempValue', factor: 1 },
+                'ref': { id: 'refSlider', valueId: 'refValue', factor: 1 }
+            };
+            const slider = sliders[type];
+            document.getElementById(slider.valueId).textContent = document.getElementById(slider.id).value;
+        }
+
+        function toggleAdvanced() {
+            const content = document.getElementById('advancedContent');
+            content.classList.toggle('show');
+        }
+
+        async function generateSpeech() {
+            const btn = document.getElementById('generateBtn');
+            const audioPlayer = document.getElementById('audioPlayer');
+            const audio = document.getElementById('audio');
+
+            const text = document.getElementById('textInput').value.trim();
+            if (!text) {
+                alert('Please enter some text');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.classList.add('loading');
+            btn.textContent = '⏳ Generating...';
+            audioPlayer.classList.remove('show');
+
+            try {
+                const requestBody = {
+                    model: 'luxtts',
+                    input: text,
+                    voice: document.getElementById('voiceInput').value || 'default',
+                    response_format: document.getElementById('formatSelect').value,
+                    speed: parseFloat(document.getElementById('speedSlider').value),
+                    rms: parseFloat(document.getElementById('rmsSlider').value),
+                    t_shift: parseFloat(document.getElementById('tempSlider').value),
+                    num_steps: parseInt(document.getElementById('stepsSlider').value),
+                    return_smooth: document.getElementById('smoothToggle').checked,
+                    ref_duration: parseInt(document.getElementById('refSlider').value)
+                };
+
+                const response = await fetch(`${API_BASE}/v1/audio/speech`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to generate speech');
+                }
+
+                audioBlob = await response.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                audio.src = audioUrl;
+                audioPlayer.classList.add('show');
+
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.classList.remove('loading');
+                btn.textContent = '🔊 Generate Speech';
+            }
+        }
+
+        function downloadAudio() {
+            if (!audioBlob) return;
+            const format = document.getElementById('formatSelect').value;
+            const url = URL.createObjectURL(audioBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `generated_speech.${format}`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Initialize
+        checkStatus();
+        loadVoices();
+        setInterval(checkStatus, 30000); // Check status every 30 seconds
+    </script>
+</body>
+</html>

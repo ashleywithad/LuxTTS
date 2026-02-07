@@ -3,7 +3,7 @@ name = "Zipvoice"
 version = "0.0.11"
 description = "Linacodec is a highly compressive and rapid audio tokenizer for audio models."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
   "cn2an",
   "huggingface-hub",

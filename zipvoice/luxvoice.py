@@ -7,7 +7,7 @@ class LuxTTS:
     LuxTTS class for encoding prompt and generating speech on cpu/cuda/mps.
     """
 
-    def __init__(self, model_path='YatharthS/LuxTTS', device='cuda', threads=4):
+    def __init__(self, model_path='YatharthS/LuxTTS', device='cuda', threads=4, dtype='float32'):
         if model_path == 'YatharthS/LuxTTS':
             model_path = None
 
@@ -23,9 +23,11 @@ class LuxTTS:
         if device == 'cpu':
             model, feature_extractor, vocos, tokenizer, transcriber = load_models_cpu(model_path, threads)
             print("Loading model on CPU")
+            self.dtype = 'float32'  # CPU only supports float32
         else:
-            model, feature_extractor, vocos, tokenizer, transcriber = load_models_gpu(model_path, device=device)
-            print("Loading model on GPU")
+            model, feature_extractor, vocos, tokenizer, transcriber = load_models_gpu(model_path, device=device, dtype=dtype)
+            print(f"Loading model on GPU with dtype={dtype}")
+            self.dtype = dtype
 
         self.model = model
         self.feature_extractor = feature_extractor
@@ -57,6 +59,6 @@ class LuxTTS:
         if self.device == 'cpu':
             final_wav = generate_cpu(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, text, self.model, self.vocos, self.tokenizer, num_step=num_steps, guidance_scale=guidance_scale, t_shift=t_shift, speed=speed)
         else:
-            final_wav = generate(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, text, self.model, self.vocos, self.tokenizer, num_step=num_steps, guidance_scale=guidance_scale, t_shift=t_shift, speed=speed)
+            final_wav = generate(prompt_tokens, prompt_features_lens, prompt_features, prompt_rms, text, self.model, self.vocos, self.tokenizer, num_step=num_steps, guidance_scale=guidance_scale, t_shift=t_shift, speed=speed, dtype=self.dtype)
 
         return final_wav.cpu()
