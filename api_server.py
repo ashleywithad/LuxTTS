@@ -20,10 +20,16 @@ Streaming Support:
 import os
 import io
 import tempfile
+import logging
+import warnings
 from typing import Optional, Literal
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+
+# Suppress warnings
+warnings.filterwarnings("ignore", message="Failed import k2")
+logging.getLogger("root").setLevel(logging.ERROR)
 
 # Load environment variables from .env file
 load_dotenv()

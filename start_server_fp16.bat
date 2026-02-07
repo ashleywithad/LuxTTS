@@ -11,10 +11,13 @@ echo   Web UI:        http://localhost:8000
 echo   API Docs:      http://localhost:8000/docs
 echo   Health Check:  http://localhost:8000/health
 echo.
-if not exist voice_samples\default.wav echo WARNING: No default voice sample found. Please place a voice sample at voice_samples\default.wav
+dir /b voice_samples\*.wav voice_samples\*.mp3 >nul 2>&1
+if errorlevel 1 echo WARNING: No voice samples found in voice_samples\ Please add .wav or .mp3 files.
 echo.
 
 set DTYPE=float16
+set PYTHONWARNINGS=ignore::UserWarning
+set PYTHONIOENCODING=utf-8
 python api_server.py
 
 pause
