@@ -107,6 +107,7 @@ class TTSRequest(BaseModel):
     num_steps: int = Field(default=4, ge=1, le=10, description="Number of sampling steps")
     return_smooth: bool = Field(default=False, description="Enable smoother audio")
     ref_duration: int = Field(default=5, ge=1, le=1000, description="Reference duration")
+    transcription: Optional[str] = Field(default=None, description="Custom transcription text for voice reference (bypasses Whisper, allows longer audio files)")
 
 
 class ModelInfo(BaseModel):
@@ -187,10 +188,24 @@ async def create_speech(request: TTSRequest):
 
     print(f"[TTS] Using voice file: {voice_file}")
 
-    # Cap ref_duration at 30 seconds (Whisper limitation)
-    actual_duration = min(request.ref_duration, 30)
-    if request.ref_duration > 30:
-        print(f"[TTS] Warning: ref_duration capped at 30 seconds (requested: {request.ref_duration}s)")
+    # Determine transcription text (in order: request parameter > .txt file > Whisper)
+    transcription_text = request.transcription
+    if transcription_text is None:
+        # Check for .txt file alongside voice sample
+        txt_file = VOICE_SAMPLES_DIR / f"{request.voice}.txt"
+        if txt_file.exists():
+            with open(txt_file, 'r', encoding='utf-8') as f:
+                transcription_text = f.read().strip()
+            print(f"[TTS] Loaded transcription from {txt_file}")
+
+    # Cap ref_duration at 30 seconds only if using Whisper (no custom transcription)
+    if transcription_text is None:
+        actual_duration = min(request.ref_duration, 30)
+        if request.ref_duration > 30:
+            print(f"[TTS] Warning: ref_duration capped at 30 seconds (use transcription parameter or .txt file to bypass)")
+    else:
+        actual_duration = request.ref_duration  # Use full requested duration with custom transcription
+        print(f"[TTS] Using custom transcription (allows longer audio files)")
 
     # If streaming is requested, use streaming response
     if request.stream:
@@ -202,7 +217,8 @@ async def create_speech(request: TTSRequest):
         encoded_prompt = lux_tts.encode_prompt(
             str(voice_file),
             rms=request.rms,
-            duration=actual_duration
+            duration=actual_duration,
+            transcription_text=transcription_text
         )
 
         # Generate speech
@@ -294,19 +310,33 @@ async def create_speech_stream(request: TTSRequest):
                 detail=f"Voice '{request.voice}' not found. Place your audio file in voice_samples/ as {request.voice}.wav or {request.voice}.mp3"
             )
 
+    # Determine transcription text (in order: request parameter > .txt file > Whisper)
+    transcription_text = request.transcription
+    if transcription_text is None:
+        txt_file = VOICE_SAMPLES_DIR / f"{request.voice}.txt"
+        if txt_file.exists():
+            with open(txt_file, 'r', encoding='utf-8') as f:
+                transcription_text = f.read().strip()
+            print(f"[TTS] Loaded transcription from {txt_file}")
+
     async def audio_generator():
         """Generate audio and yield it in chunks"""
         try:
-            # Cap ref_duration at 30 seconds (Whisper limitation)
-            actual_duration = min(request.ref_duration, 30)
-            if request.ref_duration > 30:
-                print(f"[TTS] Warning: ref_duration capped at 30 seconds (requested: {request.ref_duration}s)")
+            # Cap ref_duration at 30 seconds only if using Whisper (no custom transcription)
+            if transcription_text is None:
+                actual_duration = min(request.ref_duration, 30)
+                if request.ref_duration > 30:
+                    print(f"[TTS] Warning: ref_duration capped at 30 seconds (use transcription parameter or .txt file to bypass)")
+            else:
+                actual_duration = request.ref_duration
+                print(f"[TTS] Using custom transcription (allows longer audio files)")
 
             # Encode the prompt audio
             encoded_prompt = lux_tts.encode_prompt(
                 str(voice_file),
                 rms=request.rms,
-                duration=actual_duration
+                duration=actual_duration,
+                transcription_text=transcription_text
             )
 
             # Generate speech
@@ -349,96 +379,6 @@ async def create_speech_stream(request: TTSRequest):
 
             # Stream in chunks (8KB chunks for smooth playback)
             chunk_size = 8192
-            for i in range(0, len(audio_data), chunk_size):
-                chunk = audio_data[i:i + chunk_size]
-                yield chunk
-
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
-
-    return StreamingResponse(
-        audio_generator(),
-        media_type="audio/wav" if request.response_format == "wav" else "audio/mpeg" if request.response_format == "mp3" else "audio/pcm"
-    )
-
-
-@app.post("/v1/audio/speech/stream")
-async def create_speech_stream(request: TTSRequest):
-    """
-    Generate speech with streaming response (for Open WebUI compatibility)
-
-    This endpoint streams audio in chunks, allowing clients to start playback
-    before the entire audio is generated. Note: LuxTTS generates the full audio
-    internally, then chunks it for streaming.
-    """
-    if lux_tts is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
-    # Get voice sample path
-    voice_file = VOICE_SAMPLES_DIR / f"{request.voice}.wav"
-    if not voice_file.exists():
-        voice_file = VOICE_SAMPLES_DIR / f"{request.voice}.mp3"
-        if not voice_file.exists():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Voice '{request.voice}' not found. Place your audio file in voice_samples/ as {request.voice}.wav or {request.voice}.mp3"
-            )
-
-    async def audio_generator():
-        """Generate audio and yield it in chunks"""
-        try:
-            # Cap ref_duration at 30 seconds (Whisper limitation)
-            actual_duration = min(request.ref_duration, 30)
-            if request.ref_duration > 30:
-                print(f"[TTS] Warning: ref_duration capped at 30 seconds (requested: {request.ref_duration}s)")
-
-            # Encode the prompt audio
-            encoded_prompt = lux_tts.encode_prompt(
-                str(voice_file),
-                rms=request.rms,
-                duration=actual_duration
-            )
-
-            # Generate speech
-            audio = lux_tts.generate_speech(
-                text=request.input,
-                encode_dict=encoded_prompt,
-                num_steps=request.num_steps,
-                t_shift=request.t_shift,
-                speed=request.speed,
-                return_smooth=request.return_smooth
-            )
-
-            # Convert to numpy array
-            audio_numpy = audio.numpy().squeeze()
-
-            # Determine media type and format
-            if request.response_format == "wav":
-                media_type = "audio/wav"
-                with io.BytesIO() as buffer:
-                    sf.write(buffer, audio_numpy, 48000, format="WAV")
-                    audio_data = buffer.getvalue()
-            elif request.response_format == "mp3":
-                from pydub import AudioSegment
-                # Write WAV to memory first
-                with io.BytesIO() as wav_buffer:
-                    sf.write(wav_buffer, audio_numpy, 48000, format="WAV")
-                    wav_data = wav_buffer.getvalue()
-                # Create AudioSegment from WAV data in memory
-                audio_segment = AudioSegment.from_wav(io.BytesIO(wav_data))
-                # Export to MP3 in memory
-                with io.BytesIO() as buffer:
-                    audio_segment.export(buffer, format="mp3")
-                    audio_data = buffer.getvalue()
-                media_type = "audio/mpeg"
-            else:  # pcm
-                media_type = "audio/pcm"
-                with io.BytesIO() as buffer:
-                    sf.write(buffer, audio_numpy, 48000, format="RAW", subtype="PCM_16")
-                    audio_data = buffer.getvalue()
-
-            # Stream in chunks (simulated streaming)
-            chunk_size = 8192  # 8KB chunks
             for i in range(0, len(audio_data), chunk_size):
                 chunk = audio_data[i:i + chunk_size]
                 yield chunk

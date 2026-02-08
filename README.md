@@ -218,6 +218,46 @@ curl http://localhost:8000/v1/voices
 | `num_steps` | int | 4 | Number of sampling steps (1 to 10) |
 | `return_smooth` | bool | false | Enable smoother audio |
 | `ref_duration` | int | 5 | Reference duration for voice encoding |
+| `transcription` | string | null | Custom transcription text (bypasses Whisper, allows longer audio files) |
+
+## Custom Transcription Feature
+
+The `transcription` parameter allows you to provide your own text for the voice reference audio instead of using Whisper's automatic transcription. This provides two key benefits:
+
+### 1. Bypass the 30-Second Limit
+By default, voice files are capped at 30 seconds due to Whisper's limitation. When you provide your own transcription, the full audio file is used regardless of length.
+
+### 2. Control Pronunciation and Emotion
+You can guide the TTS with custom text that includes emotional cues, breathing patterns, or specific pronunciation styles:
+
+```json
+{
+  "voice": "annie",
+  "transcription": "mmmm... uhhhhh... ohhh god... yesss...",
+  "input": "Hello world"
+}
+```
+
+### Using .txt Files
+You can also place a `.txt` file alongside your voice sample with the same name. For example:
+- `voice_samples/annie.wav` - Voice audio
+- `voice_samples/annie.txt` - Custom transcription text
+
+The API will automatically use the `.txt` file if present, unless you override it with the `transcription` parameter.
+
+### API Example with Transcription
+```python
+response = requests.post(
+    "http://localhost:8000/v1/audio/speech",
+    json={
+        "model": "luxtts",
+        "input": "Oh wow, that's amazing!",
+        "voice": "annie",
+        "transcription": "mmmm... uhhhhh... ohhh god... yesss... mmmm",
+        "response_format": "wav"
+    }
+)
+```
 
 ## Voice Management
 

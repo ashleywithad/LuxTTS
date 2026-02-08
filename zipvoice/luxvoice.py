@@ -39,9 +39,21 @@ class LuxTTS:
 
 
 
-    def encode_prompt(self, prompt_audio, duration=5, rms=0.001):
-        """encodes audio prompt according to duration and rms(volume control)"""
-        prompt_tokens, prompt_features_lens, prompt_features, prompt_rms = process_audio(prompt_audio, self.transcriber, self.tokenizer, self.feature_extractor, self.device, target_rms=rms, duration=duration)
+    def encode_prompt(self, prompt_audio, duration=5, rms=0.001, transcription_text=None):
+        """
+        Encodes audio prompt according to duration and rms(volume control).
+
+        Args:
+            prompt_audio: Path to audio file for voice reference
+            duration: Duration in seconds to use from audio (None for full file when using custom transcription)
+            rms: Target RMS volume normalization
+            transcription_text: Optional custom text to use instead of Whisper transcription.
+                                 Allows longer audio files and provides custom pronunciation/emotional guidance.
+        """
+        prompt_tokens, prompt_features_lens, prompt_features, prompt_rms = process_audio(
+            prompt_audio, self.transcriber, self.tokenizer, self.feature_extractor,
+            self.device, target_rms=rms, duration=duration, transcription_text=transcription_text
+        )
         encode_dict = {"prompt_tokens": prompt_tokens, 'prompt_features_lens': prompt_features_lens, 'prompt_features': prompt_features, 'prompt_rms': prompt_rms}
 
         return encode_dict
