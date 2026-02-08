@@ -45,9 +45,14 @@ class LuxTTSConfig:
 
 @torch.inference_mode
 def process_audio(audio, transcriber, tokenizer, feature_extractor, device, target_rms=0.1, duration=4, feat_scale=0.1):
+    # Limit duration to 30 seconds max to avoid Whisper long-form issues
+    duration = min(duration, 30)
+
     prompt_wav, sr = librosa.load(audio, sr=24000, duration=duration)
     prompt_wav2, sr = librosa.load(audio, sr=16000, duration=duration)
-    prompt_text = transcriber(prompt_wav2)["text"]
+
+    # Handle long audio files by adding return_timestamps=True
+    prompt_text = transcriber(prompt_wav2, return_timestamps=True)["text"]
     print(prompt_text)
 
     prompt_wav = torch.from_numpy(prompt_wav).unsqueeze(0)

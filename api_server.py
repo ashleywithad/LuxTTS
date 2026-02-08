@@ -186,6 +186,11 @@ async def create_speech(request: TTSRequest):
 
     print(f"[TTS] Using voice file: {voice_file}")
 
+    # Cap ref_duration at 30 seconds (Whisper limitation)
+    actual_duration = min(request.ref_duration, 30)
+    if request.ref_duration > 30:
+        print(f"[TTS] Warning: ref_duration capped at 30 seconds (requested: {request.ref_duration}s)")
+
     # If streaming is requested, use streaming response
     if request.stream:
         return await create_speech_stream(request)
@@ -196,7 +201,7 @@ async def create_speech(request: TTSRequest):
         encoded_prompt = lux_tts.encode_prompt(
             str(voice_file),
             rms=request.rms,
-            duration=request.ref_duration
+            duration=actual_duration
         )
 
         # Generate speech
@@ -291,11 +296,16 @@ async def create_speech_stream(request: TTSRequest):
     async def audio_generator():
         """Generate audio and yield it in chunks"""
         try:
+            # Cap ref_duration at 30 seconds (Whisper limitation)
+            actual_duration = min(request.ref_duration, 30)
+            if request.ref_duration > 30:
+                print(f"[TTS] Warning: ref_duration capped at 30 seconds (requested: {request.ref_duration}s)")
+
             # Encode the prompt audio
             encoded_prompt = lux_tts.encode_prompt(
                 str(voice_file),
                 rms=request.rms,
-                duration=request.ref_duration
+                duration=actual_duration
             )
 
             # Generate speech
@@ -376,11 +386,16 @@ async def create_speech_stream(request: TTSRequest):
     async def audio_generator():
         """Generate audio and yield it in chunks"""
         try:
+            # Cap ref_duration at 30 seconds (Whisper limitation)
+            actual_duration = min(request.ref_duration, 30)
+            if request.ref_duration > 30:
+                print(f"[TTS] Warning: ref_duration capped at 30 seconds (requested: {request.ref_duration}s)")
+
             # Encode the prompt audio
             encoded_prompt = lux_tts.encode_prompt(
                 str(voice_file),
                 rms=request.rms,
-                duration=request.ref_duration
+                duration=actual_duration
             )
 
             # Generate speech
