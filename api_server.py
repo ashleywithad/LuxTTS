@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 # Suppress warnings
 warnings.filterwarnings("ignore", message="Failed import k2")
+warnings.filterwarnings("ignore", message="You are using `torch.load` with `weights_only=False`")
 logging.getLogger("root").setLevel(logging.ERROR)
 
 # Load environment variables from .env file
