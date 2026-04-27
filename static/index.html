@@ -478,6 +478,16 @@
                             </div>
                         </div>
 
+                        <div class="row">
+                            <div class="form-group">
+                                <label>Max Chunk: <span id="chunkValue" class="slider-value">200</span> chars</label>
+                                <div class="slider-group">
+                                    <input type="range" id="chunkSlider" min="0" max="500" step="10" value="200" oninput="updateSlider('chunk')">
+                                </div>
+                                <div class="voice-count" style="margin-top:2px;font-size:0.75em;">0 = no chunking (may OOM on long text)</div>
+                            </div>
+                        </div>
+
                         <div class="form-group">
                             <div class="toggle-group">
                                 <label class="toggle">
@@ -496,7 +506,9 @@
                         • Use at least 3 seconds of audio for voice cloning<br>
                         • Lower temperature = fewer errors but less expression<br>
                         • More steps = better quality but slower<br>
-                        • Enable "Smooth" if you hear metallic sounds
+                        • Enable "Smooth" if you hear metallic sounds<br>
+                        • <strong>Max Chunk</strong> splits long text into segments to prevent OOM on 4GB GPUs<br>
+                        • Set Max Chunk to 0 for short text (disables splitting)
                     </p>
                 </div>
 
@@ -603,7 +615,8 @@
                 'rms': { id: 'rmsSlider', valueId: 'rmsValue', factor: 1 },
                 'steps': { id: 'stepsSlider', valueId: 'stepsValue', factor: 1 },
                 'temp': { id: 'tempSlider', valueId: 'tempValue', factor: 1 },
-                'ref': { id: 'refSlider', valueId: 'refValue', factor: 1 }
+                'ref': { id: 'refSlider', valueId: 'refValue', factor: 1 },
+                'chunk': { id: 'chunkSlider', valueId: 'chunkValue', factor: 1 }
             };
             const slider = sliders[type];
             document.getElementById(slider.valueId).textContent = document.getElementById(slider.id).value;
@@ -643,7 +656,8 @@
                     t_shift: parseFloat(document.getElementById('tempSlider').value),
                     num_steps: parseInt(document.getElementById('stepsSlider').value),
                     return_smooth: document.getElementById('smoothToggle').checked,
-                    ref_duration: parseInt(document.getElementById('refSlider').value)
+                    ref_duration: parseInt(document.getElementById('refSlider').value),
+                    max_chunk_chars: parseInt(document.getElementById('chunkSlider').value)
                 };
 
                 const response = await fetch(`${API_BASE}/v1/audio/speech`, {

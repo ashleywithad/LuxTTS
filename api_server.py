@@ -15,12 +15,17 @@ API Endpoints:
 Streaming Support:
 - Set stream=true in the request body for streaming response
 - Compatible with Open WebUI and other OpenAI-compatible clients
+
+Chunking Support:
+- Long text is automatically split into chunks to prevent CUDA OOM on low-VRAM GPUs
+- Chunks are generated separately and cross-fade concatenated for seamless output
+- Use max_chunk_chars=0 to disable chunking (single-pass generation)
 """
 
 import os
 import io
+import re
 import gc
-import tempfile
 import logging
 import warnings
 from typing import Optional, Literal
@@ -48,6 +53,7 @@ import soundfile as sf
 import numpy as np
 
 from zipvoice.luxvoice import LuxTTS
+from zipvoice.utils.infer import cross_fade_concat
 
 # Configuration
 MODEL_PATH = os.getenv("MODEL_PATH", "YatharthS/LuxTTS")
@@ -74,17 +80,16 @@ if torch.cuda.is_available():
 VOICE_SAMPLES_DIR = Path(__file__).parent / "voice_samples"
 VOICE_SAMPLES_DIR.mkdir(exist_ok=True)
 
+# Chunking constants
+SAMPLE_RATE = 48000
+CROSSFADE_DURATION = 0.05  # 50ms cross-fade between chunks
+DEFAULT_MAX_CHUNK_CHARS = 200  # ~80 tokens, safe for 4GB VRAM
+
 # Global model instance
 lux_tts: Optional[LuxTTS] = None
 
 
 def _apply_half_precision(lux_tts_instance: LuxTTS) -> None:
-    """Apply half-precision (float16) to model components for reduced VRAM.
-
-    Note: This may be slower than float32 on consumer Ampere GPUs (RTX 3050/3060)
-    due to complex FFT operations falling back to slower emulated execution.
-    Use only if VRAM is constrained.
-    """
     if lux_tts_instance.device == "cpu":
         return
     lux_tts_instance.model = lux_tts_instance.model.half()
@@ -92,15 +97,100 @@ def _apply_half_precision(lux_tts_instance: LuxTTS) -> None:
 
 
 def _cleanup_gpu_memory() -> None:
-    """Aggressively free GPU memory between requests."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
+def _chunk_text(text: str, max_chars: int = DEFAULT_MAX_CHUNK_CHARS) -> list[str]:
+    """Split text into chunks at sentence boundaries, each <= max_chars.
+
+    Splits on sentence-ending punctuation (. ! ? ; : , \n) and merges
+    short segments together up to max_chars. Keeps punctuation attached
+    to the preceding sentence.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+
+    # Split on sentence boundaries, keeping the delimiter with the preceding text
+    parts = re.split(r'([.!?,;:\n]+)', text)
+    segments: list[str] = []
+    current = ""
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        i += 1
+        # If the next part is a delimiter, merge it with the current segment
+        if i < len(parts) and re.match(r'[.!?,;:\n]+', parts[i]):
+            part += parts[i]
+            i += 1
+        candidate = current + part if not current else current + " " + part
+        candidate = candidate.strip()
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                segments.append(current.strip())
+            # If a single segment exceeds max_chars, force-split by words
+            if len(part.strip()) > max_chars:
+                words = part.strip().split()
+                forced = ""
+                for word in words:
+                    if forced and len(forced) + 1 + len(word) > max_chars:
+                        segments.append(forced.strip())
+                        forced = word
+                    else:
+                        forced = (forced + " " + word).strip() if forced else word
+                current = forced
+            else:
+                current = part.strip()
+
+    if current.strip():
+        segments.append(current.strip())
+
+    # Merge tiny trailing segments into the previous one if possible
+    merged: list[str] = []
+    for seg in segments:
+        if merged and len(seg) < 20 and len(merged[-1]) + 1 + len(seg) <= max_chars:
+            merged[-1] = (merged[-1] + " " + seg).strip()
+        else:
+            merged.append(seg)
+
+    return [s for s in merged if s]
+
+
+def _crossfade_numpy(chunks: list[np.ndarray], fade_samples: int) -> np.ndarray:
+    """Cross-fade concatenate numpy audio chunks.
+
+    Args:
+        chunks: List of 1D numpy audio arrays at SAMPLE_RATE.
+        fade_samples: Number of samples for cross-fade overlap.
+
+    Returns:
+        Single concatenated 1D numpy array.
+    """
+    if len(chunks) == 0:
+        return np.array([], dtype=np.float32)
+    if len(chunks) == 1:
+        return chunks[0]
+    if fade_samples <= 0:
+        return np.concatenate(chunks)
+
+    result = chunks[0]
+    for chunk in chunks[1:]:
+        k = min(fade_samples, len(result), len(chunk))
+        if k <= 0:
+            result = np.concatenate([result, chunk])
+            continue
+        fade_out = np.linspace(1.0, 0.0, k, dtype=np.float32)
+        fade_in = np.linspace(0.0, 1.0, k, dtype=np.float32)
+        overlapped = result[-k:] * fade_out + chunk[:k] * fade_in
+        result = np.concatenate([result[:-k], overlapped, chunk[k:]])
+    return result
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup/shutdown events"""
     global lux_tts
     print(f"Loading LuxTTS model from {MODEL_PATH} on {DEVICE}...")
     print(f"  TF32: {'enabled' if ENABLE_TF32 else 'disabled'}")
@@ -133,7 +223,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LuxTTS OpenAI-Compatible API",
     description="OpenAI-compatible TTS API powered by LuxTTS",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -143,7 +233,6 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
 class TTSRequest(BaseModel):
-    """OpenAI-compatible TTS request model"""
     model: str = Field(default="luxtts", description="Model identifier")
     input: str = Field(..., min_length=1, description="Text to generate speech from")
     voice: str = Field(default="default", description="Voice preset to use")
@@ -157,6 +246,10 @@ class TTSRequest(BaseModel):
     return_smooth: bool = Field(default=False, description="Enable smoother audio")
     ref_duration: int = Field(default=3, ge=1, le=1000, description="Reference duration in seconds")
     guidance_scale: float = Field(default=3.0, ge=0.1, le=10.0, description="Guidance scale")
+    max_chunk_chars: int = Field(
+        default=DEFAULT_MAX_CHUNK_CHARS, ge=0, le=5000,
+        description="Max characters per chunk (0=disable chunking, prevents OOM on long text)"
+    )
 
 
 class ModelInfo(BaseModel):
@@ -222,44 +315,111 @@ def _encode_prompt(voice_file: Path, rms: float, ref_duration: int):
     )
 
 
-def _generate_audio(request: TTSRequest, voice_file: Path):
-    encoded_prompt = _encode_prompt(voice_file, request.rms, request.ref_duration)
-
-    dtype = torch.float16 if ENABLE_FP16 and DEVICE != "cpu" else None
-
+def _generate_single(text: str, encoded_prompt: dict, num_steps: int,
+                      guidance_scale: float, t_shift: float, speed: float,
+                      return_smooth: bool) -> np.ndarray:
+    """Generate audio for a single text chunk. Returns 1D numpy array."""
     with torch.inference_mode():
         audio = lux_tts.generate_speech(
-            text=request.input,
+            text=text,
             encode_dict=encoded_prompt,
-            num_steps=request.num_steps,
-            guidance_scale=request.guidance_scale,
-            t_shift=request.t_shift,
-            speed=request.speed,
-            return_smooth=request.return_smooth,
+            num_steps=num_steps,
+            guidance_scale=guidance_scale,
+            t_shift=t_shift,
+            speed=speed,
+            return_smooth=return_smooth,
         )
-
-    audio_numpy = audio.numpy().squeeze()
-    print(f"[TTS] Generated audio shape: {audio_numpy.shape}, duration: {len(audio_numpy)/48000:.2f}s")
-
     _cleanup_gpu_memory()
-    return audio_numpy
+    return audio.numpy().squeeze()
+
+
+def _generate_audio(request: TTSRequest, voice_file: Path) -> np.ndarray:
+    encoded_prompt = _encode_prompt(voice_file, request.rms, request.ref_duration)
+
+    # Determine if chunking is needed
+    chunks = _chunk_text(request.input, request.max_chunk_chars)
+
+    if len(chunks) <= 1:
+        # Single-pass generation (short text)
+        audio_numpy = _generate_single(
+            request.input, encoded_prompt,
+            request.num_steps, request.guidance_scale,
+            request.t_shift, request.speed, request.return_smooth,
+        )
+        print(f"[TTS] Generated audio: shape={audio_numpy.shape}, "
+              f"duration={len(audio_numpy)/SAMPLE_RATE:.2f}s")
+        return audio_numpy
+
+    # Chunked generation (long text — prevents OOM on low-VRAM GPUs)
+    print(f"[TTS] Chunking text into {len(chunks)} segments "
+          f"({', '.join(str(len(c)) for c in chunks)} chars)")
+    fade_samples = int(CROSSFADE_DURATION * SAMPLE_RATE)
+    audio_chunks: list[np.ndarray] = []
+
+    for i, chunk_text in enumerate(chunks):
+        print(f"[TTS] Generating chunk {i+1}/{len(chunks)}: "
+              f"{len(chunk_text)} chars, '{chunk_text[:50]}...'")
+        try:
+            chunk_audio = _generate_single(
+                chunk_text, encoded_prompt,
+                request.num_steps, request.guidance_scale,
+                request.t_shift, request.speed, request.return_smooth,
+            )
+            # Ensure 1D
+            if chunk_audio.ndim > 1:
+                chunk_audio = chunk_audio.squeeze()
+            audio_chunks.append(chunk_audio)
+        except torch.cuda.OutOfMemoryError:
+            _cleanup_gpu_memory()
+            raise HTTPException(
+                status_code=507,
+                detail=f"CUDA OOM on chunk {i+1}/{len(chunks)} "
+                        f"({len(chunk_text)} chars). Try reducing max_chunk_chars "
+                        f"(current: {request.max_chunk_chars}) or shorter text.",
+            )
+
+    result = _crossfade_numpy(audio_chunks, fade_samples)
+    total_duration = len(result) / SAMPLE_RATE
+    print(f"[TTS] Chunked generation complete: {len(chunks)} chunks, "
+          f"total duration={total_duration:.2f}s")
+    return result
+
+
+def _generate_audio_chunks(request: TTSRequest, voice_file: Path):
+    """Yield (numpy_array, chunk_index, total_chunks) for each text chunk.
+
+    Used by the streaming endpoint to send audio progressively.
+    """
+    encoded_prompt = _encode_prompt(voice_file, request.rms, request.ref_duration)
+    chunks = _chunk_text(request.input, request.max_chunk_chars)
+
+    for i, chunk_text in enumerate(chunks):
+        print(f"[TTS Stream] Generating chunk {i+1}/{len(chunks)}: {len(chunk_text)} chars")
+        chunk_audio = _generate_single(
+            chunk_text, encoded_prompt,
+            request.num_steps, request.guidance_scale,
+            request.t_shift, request.speed, request.return_smooth,
+        )
+        if chunk_audio.ndim > 1:
+            chunk_audio = chunk_audio.squeeze()
+        yield chunk_audio, i, len(chunks)
 
 
 def _encode_audio(audio_numpy: np.ndarray, fmt: str) -> tuple[bytes, str]:
     if fmt == "wav":
         with io.BytesIO() as buf:
-            sf.write(buf, audio_numpy, 48000, format="WAV")
+            sf.write(buf, audio_numpy, SAMPLE_RATE, format="WAV")
             return buf.getvalue(), "audio/wav"
 
     if fmt == "pcm":
         with io.BytesIO() as buf:
-            sf.write(buf, audio_numpy, 48000, format="RAW", subtype="PCM_16")
+            sf.write(buf, audio_numpy, SAMPLE_RATE, format="RAW", subtype="PCM_16")
             return buf.getvalue(), "audio/pcm"
 
     # fmt == "mp3" — try soundfile native MP3 first (requires libsndfile >= 1.1)
     try:
         with io.BytesIO() as buf:
-            sf.write(buf, audio_numpy, 48000, format="MP3")
+            sf.write(buf, audio_numpy, SAMPLE_RATE, format="MP3")
             return buf.getvalue(), "audio/mpeg"
     except Exception:
         pass
@@ -268,7 +428,7 @@ def _encode_audio(audio_numpy: np.ndarray, fmt: str) -> tuple[bytes, str]:
     try:
         from pydub import AudioSegment
         with io.BytesIO() as wav_buf:
-            sf.write(wav_buf, audio_numpy, 48000, format="WAV")
+            sf.write(wav_buf, audio_numpy, SAMPLE_RATE, format="WAV")
             wav_data = wav_buf.getvalue()
         audio_segment = AudioSegment.from_wav(io.BytesIO(wav_data))
         with io.BytesIO() as mp3_buf:
@@ -284,7 +444,8 @@ async def create_speech(request: TTSRequest):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     print(f"[TTS Request] voice={request.voice}, format={request.response_format}, "
-          f"stream={request.stream}, text_len={len(request.input)}")
+          f"stream={request.stream}, text_len={len(request.input)}, "
+          f"max_chunk_chars={request.max_chunk_chars}")
 
     voice_file = _find_voice_file(request.voice)
 
@@ -317,19 +478,28 @@ async def create_speech_stream(request: TTSRequest):
 
     voice_file = _find_voice_file(request.voice)
 
-    async def audio_generator():
-        try:
-            audio_numpy = _generate_audio(request, voice_file)
-            audio_data, media_type = _encode_audio(audio_numpy, request.response_format)
-
-            chunk_size = 8192
-            for i in range(0, len(audio_data), chunk_size):
-                yield audio_data[i:i + chunk_size]
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error generating speech: {e}")
-
     fmt = request.response_format
     content_type = "audio/wav" if fmt == "wav" else "audio/mpeg" if fmt == "mp3" else "audio/pcm"
+
+    async def audio_generator():
+        chunks = _chunk_text(request.input, request.max_chunk_chars)
+        fade_samples = int(CROSSFADE_DURATION * SAMPLE_RATE)
+        audio_chunks: list[np.ndarray] = []
+
+        for chunk_audio, idx, total in _generate_audio_chunks(request, voice_file):
+            audio_chunks.append(chunk_audio)
+
+            # For streaming: if this is the last chunk, cross-fade all and send
+            # For intermediate chunks: accumulate silently
+            if idx == total - 1:
+                # Final chunk — cross-fade everything together
+                result = _crossfade_numpy(audio_chunks, fade_samples)
+                audio_data, _ = _encode_audio(result, fmt)
+                chunk_size = 8192
+                for i in range(0, len(audio_data), chunk_size):
+                    yield audio_data[i:i + chunk_size]
+            # Intermediate chunks: nothing to yield yet (accumulate for cross-fade)
+
     return StreamingResponse(audio_generator(), media_type=content_type)
 
 
