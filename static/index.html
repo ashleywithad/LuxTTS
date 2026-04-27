@@ -447,9 +447,9 @@
                     </div>
                     <div class="advanced-settings-content" id="advancedContent">
                         <div class="form-group">
-                            <label>RMS (Volume): <span id="rmsValue" class="slider-value">0.01</span></label>
+                            <label>RMS (Volume): <span id="rmsValue" class="slider-value">0.001</span></label>
                             <div class="slider-group">
-                                <input type="range" id="rmsSlider" min="0" max="0.1" step="0.001" value="0.01" oninput="updateSlider('rms')">
+                                <input type="range" id="rmsSlider" min="0" max="0.1" step="0.001" value="0.001" oninput="updateSlider('rms')">
                             </div>
                         </div>
 
@@ -462,18 +462,18 @@
                             </div>
 
                             <div class="form-group">
-                                <label>Temperature: <span id="tempValue" class="slider-value">0.9</span></label>
+                                <label>Temperature: <span id="tempValue" class="slider-value">0.5</span></label>
                                 <div class="slider-group">
-                                    <input type="range" id="tempSlider" min="0" max="1" step="0.05" value="0.9" oninput="updateSlider('temp')">
+                                    <input type="range" id="tempSlider" min="0" max="1" step="0.05" value="0.5" oninput="updateSlider('temp')">
                                 </div>
                             </div>
                         </div>
 
                         <div class="row">
                             <div class="form-group">
-                                <label>Ref Duration: <span id="refValue" class="slider-value">5</span>s</label>
+                                <label>Ref Duration: <span id="refValue" class="slider-value">3</span>s</label>
                                 <div class="slider-group">
-                                    <input type="range" id="refSlider" min="1" max="10" step="1" value="5" oninput="updateSlider('ref')">
+                                    <input type="range" id="refSlider" min="1" max="10" step="1" value="3" oninput="updateSlider('ref')">
                                 </div>
                             </div>
                         </div>

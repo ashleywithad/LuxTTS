@@ -31,8 +31,8 @@ def test_tts_api(base_url="http://localhost:8000"):
         "response_format": "wav",
         "speed": 1.0,
         # Optional LuxTTS-specific parameters
-        "rms": 0.01,
-        "t_shift": 0.9,
+        "rms": 0.001,
+        "t_shift": 0.5,
         "num_steps": 4
     }
 
