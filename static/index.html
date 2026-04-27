@@ -145,7 +145,6 @@
             border-color: #00d4ff;
         }
 
-        /* Custom select dropdown styling */
         select {
             cursor: pointer;
             appearance: none;
@@ -284,11 +283,35 @@
             width: 100%;
         }
 
-        .download-btn {
+        .button-row {
+            display: flex;
+            gap: 10px;
             margin-top: 10px;
+        }
+
+        .download-btn {
+            flex: 1;
             padding: 10px 20px;
             background: rgba(255, 255, 255, 0.1);
             border: 1px solid rgba(255, 255, 255, 0.2);
+            font-size: 0.9em;
+        }
+
+        .download-btn:disabled {
+            opacity: 0.3;
+        }
+
+        .stop-btn {
+            flex: 1;
+            padding: 10px 20px;
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            font-size: 0.9em;
+            display: none;
+        }
+
+        .stop-btn.show {
+            display: block;
         }
 
         .voice-select-wrapper {
@@ -370,10 +393,52 @@
             gap: 15px;
         }
 
-        .voice-dropdown-container {
+        .streaming-toggle {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .streaming-toggle .toggle-label {
             display: flex;
             align-items: center;
             gap: 10px;
+        }
+
+        .streaming-toggle .toggle-desc {
+            font-size: 0.8em;
+            color: #a0a0a0;
+            margin-top: 4px;
+        }
+
+        .progress-bar-container {
+            margin-top: 10px;
+            display: none;
+        }
+
+        .progress-bar-container.show {
+            display: block;
+        }
+
+        .progress-bar {
+            height: 4px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            border-radius: 2px;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+
+        .progress-text {
+            font-size: 0.8em;
+            color: #a0a0a0;
+            margin-top: 5px;
         }
     </style>
 </head>
@@ -418,15 +483,38 @@
                     </select>
                 </div>
 
+                <div class="streaming-toggle">
+                    <div class="toggle-group">
+                        <label class="toggle">
+                            <input type="checkbox" id="streamToggle" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <div>
+                            <div class="toggle-label">
+                                <span>Live Streaming</span>
+                            </div>
+                            <div class="toggle-desc">Play audio as it generates (no cross-fade)</div>
+                        </div>
+                    </div>
+                </div>
+
                 <button id="generateBtn" onclick="generateSpeech()">
                     🔊 Generate Speech
                 </button>
 
+                <div class="progress-bar-container" id="progressContainer">
+                    <div class="progress-bar">
+                        <div class="progress-bar-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-text" id="progressText">Preparing...</div>
+                </div>
+
                 <div class="audio-player" id="audioPlayer">
                     <audio id="audio" controls></audio>
-                    <button class="download-btn" onclick="downloadAudio()">
-                        💾 Download
-                    </button>
+                    <div class="button-row">
+                        <button class="stop-btn" id="stopBtn" onclick="stopPlayback()">⏹ Stop</button>
+                        <button class="download-btn" id="downloadBtn" onclick="downloadAudio()" disabled>💾 Download</button>
+                    </div>
                 </div>
             </div>
 
@@ -507,8 +595,9 @@
                         • Lower temperature = fewer errors but less expression<br>
                         • More steps = better quality but slower<br>
                         • Enable "Smooth" if you hear metallic sounds<br>
-                        • <strong>Max Chunk</strong> splits long text into segments to prevent OOM on 4GB GPUs<br>
-                        • Set Max Chunk to 0 for short text (disables splitting)
+                        • <strong>Live Streaming</strong> plays audio as it generates, no waiting<br>
+                        • Disable streaming to get cross-faded output with Download<br>
+                        • <strong>Max Chunk</strong> splits long text to prevent OOM
                     </p>
                 </div>
 
@@ -536,10 +625,14 @@
 
     <script>
         const API_BASE = window.location.origin;
+        const STREAM_SAMPLE_RATE = 48000;
         let audioBlob = null;
         let availableVoices = [];
+        let currentAudioCtx = null;
+        let scheduledSources = [];
+        let streamAbortController = null;
+        let nextStartTime = 0;
 
-        // Check server status
         async function checkStatus() {
             try {
                 const response = await fetch(`${API_BASE}/health`);
@@ -558,7 +651,6 @@
             }
         }
 
-        // Load available voices from server
         async function loadVoices() {
             const voiceSelect = document.getElementById('voiceSelect');
             const voiceCount = document.getElementById('voiceCount');
@@ -573,10 +665,8 @@
                     const data = await response.json();
                     availableVoices = data.voices || [];
 
-                    // Save current selection
                     const currentSelection = voiceSelect.value;
 
-                    // Clear and repopulate select
                     voiceSelect.innerHTML = '';
                     if (availableVoices.length === 0) {
                         voiceSelect.innerHTML = '<option value="default" selected>default (no voices found)</option>';
@@ -589,7 +679,6 @@
                             voiceSelect.appendChild(option);
                         });
 
-                        // Restore selection if it still exists, otherwise select first
                         if (availableVoices.includes(currentSelection)) {
                             voiceSelect.value = currentSelection;
                         } else {
@@ -629,41 +718,200 @@
             icon.textContent = content.classList.contains('show') ? '▼' : '▶️';
         }
 
-        async function generateSpeech() {
+        function buildRequestBody() {
+            return {
+                model: 'luxtts',
+                input: document.getElementById('textInput').value.trim(),
+                voice: document.getElementById('voiceSelect').value || 'default',
+                response_format: document.getElementById('formatSelect').value,
+                speed: parseFloat(document.getElementById('speedSlider').value),
+                rms: parseFloat(document.getElementById('rmsSlider').value),
+                t_shift: parseFloat(document.getElementById('tempSlider').value),
+                num_steps: parseInt(document.getElementById('stepsSlider').value),
+                return_smooth: document.getElementById('smoothToggle').checked,
+                ref_duration: parseInt(document.getElementById('refSlider').value),
+                max_chunk_chars: parseInt(document.getElementById('chunkSlider').value)
+            };
+        }
+
+        function setGenerating(isGenerating, text) {
             const btn = document.getElementById('generateBtn');
             const audioPlayer = document.getElementById('audioPlayer');
-            const audio = document.getElementById('audio');
+            const progressContainer = document.getElementById('progressContainer');
+            const stopBtn = document.getElementById('stopBtn');
 
-            const text = document.getElementById('textInput').value.trim();
-            if (!text) {
-                alert('Please enter some text');
-                return;
+            btn.disabled = isGenerating;
+            if (isGenerating) {
+                btn.classList.add('loading');
+                audioPlayer.classList.remove('show');
+                progressContainer.classList.add('show');
+                stopBtn.classList.add('show');
+            } else {
+                btn.classList.remove('loading');
+                progressContainer.classList.remove('show');
+                stopBtn.classList.remove('show');
             }
+            btn.textContent = text || '🔊 Generate Speech';
+        }
 
-            btn.disabled = true;
-            btn.classList.add('loading');
-            btn.textContent = '⏳ Generating...';
-            audioPlayer.classList.remove('show');
+        function updateProgress(chunkNum, totalChunks, pct) {
+            const fill = document.getElementById('progressFill');
+            const text = document.getElementById('progressText');
+            fill.style.width = pct + '%';
+            if (totalChunks > 1) {
+                text.textContent = `Generating chunk ${chunkNum}/${totalChunks}...`;
+            } else {
+                text.textContent = 'Generating...';
+            }
+        }
+
+        function pcmToAudioBuffer(audioCtx, pcmBytes) {
+            const int16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength / 2);
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) {
+                float32[i] = int16[i] / 32768;
+            }
+            const buffer = audioCtx.createBuffer(1, float32.length, STREAM_SAMPLE_RATE);
+            buffer.copyToChannel(float32, 0);
+            return buffer;
+        }
+
+        function stopPlayback() {
+            if (streamAbortController) {
+                streamAbortController.abort();
+                streamAbortController = null;
+            }
+            scheduledSources.forEach(src => {
+                try { src.stop(); } catch (e) {}
+            });
+            scheduledSources = [];
+            if (currentAudioCtx && currentAudioCtx.state !== 'closed') {
+                currentAudioCtx.close();
+                currentAudioCtx = null;
+            }
+            setGenerating(false);
+        }
+
+        async function generateSpeechStream(requestBody) {
+            streamAbortController = new AbortController();
+            currentAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: STREAM_SAMPLE_RATE });
+            nextStartTime = 0;
+            scheduledSources = [];
+
+            const progressContainer = document.getElementById('progressContainer');
+            const downloadBtn = document.getElementById('downloadBtn');
+            const audioPlayer = document.getElementById('audioPlayer');
+            downloadBtn.disabled = true;
+
+            let playedChunks = 0;
 
             try {
-                const requestBody = {
-                    model: 'luxtts',
-                    input: text,
-                    voice: document.getElementById('voiceSelect').value || 'default',
-                    response_format: document.getElementById('formatSelect').value,
-                    speed: parseFloat(document.getElementById('speedSlider').value),
-                    rms: parseFloat(document.getElementById('rmsSlider').value),
-                    t_shift: parseFloat(document.getElementById('tempSlider').value),
-                    num_steps: parseInt(document.getElementById('stepsSlider').value),
-                    return_smooth: document.getElementById('smoothToggle').checked,
-                    ref_duration: parseInt(document.getElementById('refSlider').value),
-                    max_chunk_chars: parseInt(document.getElementById('chunkSlider').value)
-                };
+                const response = await fetch(`${API_BASE}/v1/audio/speech/stream`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody),
+                    signal: streamAbortController.signal
+                });
 
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to generate speech');
+                }
+
+                const reader = response.body.getReader();
+                let pcmBuffer = new Uint8Array(0);
+                const MIN_SAMPLES = STREAM_SAMPLE_RATE;
+                const estimatedChunks = Math.max(1, Math.ceil(requestBody.input.length / (requestBody.max_chunk_chars || 200)));
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    pcmBuffer = appendBuffer(pcmBuffer, value);
+
+                    while (pcmBuffer.byteLength >= MIN_SAMPLES * 2) {
+                        const maxSamples = Math.floor(pcmBuffer.byteLength / 2);
+                        const samplesToPlay = Math.min(maxSamples, MAX_PLAY_SAMPLES());
+                        const byteLen = samplesToPlay * 2;
+                        const pcmData = pcmBuffer.slice(0, byteLen);
+                        pcmBuffer = pcmBuffer.slice(byteLen);
+
+                        const audioBuffer = pcmToAudioBuffer(currentAudioCtx, pcmData);
+                        const source = currentAudioCtx.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(currentAudioCtx.destination);
+
+                        const now = currentAudioCtx.currentTime;
+                        const startTime = Math.max(now, nextStartTime);
+                        source.start(startTime);
+                        nextStartTime = startTime + audioBuffer.duration;
+                        scheduledSources.push(source);
+                        playedChunks++;
+
+                        const pct = Math.min(90, (playedChunks / estimatedChunks) * 100);
+                        updateProgress(playedChunks, estimatedChunks, pct);
+                        setGenerating(true, `Streaming ${playedChunks}...`);
+                    }
+                }
+
+                if (pcmBuffer.byteLength > 1) {
+                    const evenLen = pcmBuffer.byteLength - (pcmBuffer.byteLength % 2);
+                    const pcmData = pcmBuffer.slice(0, evenLen);
+                    const audioBuffer = pcmToAudioBuffer(currentAudioCtx, pcmData);
+                    const source = currentAudioCtx.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(currentAudioCtx.destination);
+                    const startTime = Math.max(currentAudioCtx.currentTime, nextStartTime);
+                    source.start(startTime);
+                    scheduledSources.push(source);
+                    playedChunks++;
+                }
+
+                updateProgress(playedChunks, playedChunks, 100);
+                setGenerating(true, 'Playback in progress...');
+
+                const lastSource = scheduledSources[scheduledSources.length - 1];
+                if (lastSource) {
+                    lastSource.onended = () => {
+                        setGenerating(false);
+                    };
+                } else {
+                    setGenerating(false);
+                }
+
+                audioPlayer.classList.add('show');
+                downloadBtn.disabled = false;
+
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    return;
+                }
+                alert(`Error: ${error.message}`);
+                setGenerating(false);
+            }
+        }
+
+        function MAX_PLAY_SAMPLES() {
+            return STREAM_SAMPLE_RATE * 10;
+        }
+
+        function appendBuffer(existing, newData) {
+            const combined = new Uint8Array(existing.byteLength + newData.byteLength);
+            combined.set(existing, 0);
+            combined.set(newData, existing.byteLength);
+            return combined;
+        }
+
+        async function generateSpeechNonStream(requestBody) {
+            const audio = document.getElementById('audio');
+            const audioPlayer = document.getElementById('audioPlayer');
+            const downloadBtn = document.getElementById('downloadBtn');
+
+            try {
                 const response = await fetch(`${API_BASE}/v1/audio/speech`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(requestBody)
+                    body: JSON.stringify({ ...requestBody, stream: false })
                 });
 
                 if (!response.ok) {
@@ -675,32 +923,83 @@
                 const audioUrl = URL.createObjectURL(audioBlob);
                 audio.src = audioUrl;
                 audioPlayer.classList.add('show');
+                downloadBtn.disabled = false;
 
             } catch (error) {
                 alert(`Error: ${error.message}`);
-            } finally {
-                btn.disabled = false;
-                btn.classList.remove('loading');
-                btn.textContent = '🔊 Generate Speech';
             }
         }
 
-        function downloadAudio() {
-            if (!audioBlob) return;
-            const format = document.getElementById('formatSelect').value;
-            const url = URL.createObjectURL(audioBlob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `generated_speech.${format}`;
-            a.click();
-            URL.revokeObjectURL(url);
+        async function generateSpeech() {
+            const text = document.getElementById('textInput').value.trim();
+            if (!text) {
+                alert('Please enter some text');
+                return;
+            }
+
+            stopPlayback();
+
+            const requestBody = buildRequestBody();
+            const useStream = document.getElementById('streamToggle').checked;
+
+            setGenerating(true, useStream ? 'Connecting...' : '⏳ Generating...');
+            audioBlob = null;
+
+            if (useStream) {
+                await generateSpeechStream(requestBody);
+            } else {
+                await generateSpeechNonStream(requestBody);
+                setGenerating(false);
+            }
         }
 
-        // Initialize
+        async function downloadAudio() {
+            const format = document.getElementById('formatSelect').value;
+            const btn = document.getElementById('downloadBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Rendering...';
+
+            try {
+                if (audioBlob) {
+                    const url = URL.createObjectURL(audioBlob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `generated_speech.${format}`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                } else {
+                    const requestBody = buildRequestBody();
+                    const response = await fetch(`${API_BASE}/v1/audio/speech`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ...requestBody, stream: false })
+                    });
+
+                    if (!response.ok) {
+                        const error = await response.json();
+                        throw new Error(error.detail || 'Failed to generate speech');
+                    }
+
+                    const blob = await response.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `generated_speech.${format}`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                }
+            } catch (error) {
+                alert(`Download error: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '💾 Download';
+            }
+        }
+
         checkStatus();
         loadVoices();
-        setInterval(checkStatus, 30000); // Check status every 30 seconds
-        setInterval(loadVoices, 60000); // Refresh voices every minute
+        setInterval(checkStatus, 30000);
+        setInterval(loadVoices, 60000);
     </script>
 </body>
 </html>

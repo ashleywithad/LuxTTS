@@ -6,14 +6,16 @@ It follows the OpenAI API specification for text-to-speech.
 
 API Endpoints:
 - POST /v1/audio/speech - Generate speech from text (OpenAI compatible, supports stream parameter)
-- POST /v1/audio/speech/stream - Explicit streaming endpoint
+- POST /v1/audio/speech/stream - Explicit streaming endpoint (raw PCM progressive)
 - GET /v1/models - List available models (OpenAI compatible)
 - GET /v1/voices - List available voice presets
 - GET /health - Health check endpoint
 - GET / - Web UI
 
 Streaming Support:
-- Set stream=true in the request body for streaming response
+- Set stream=true for progressive PCM streaming (raw int16 LE, 48kHz, mono)
+- Audio is sent chunk-by-chunk as each text segment finishes generating
+- No cross-fade in streaming (lowest latency); non-streaming retains cross-fade
 - Compatible with Open WebUI and other OpenAI-compatible clients
 
 Chunking Support:
@@ -395,11 +397,20 @@ def _generate_audio_chunks(request: TTSRequest, voice_file: Path):
 
     for i, chunk_text in enumerate(chunks):
         print(f"[TTS Stream] Generating chunk {i+1}/{len(chunks)}: {len(chunk_text)} chars")
-        chunk_audio = _generate_single(
-            chunk_text, encoded_prompt,
-            request.num_steps, request.guidance_scale,
-            request.t_shift, request.speed, request.return_smooth,
-        )
+        try:
+            chunk_audio = _generate_single(
+                chunk_text, encoded_prompt,
+                request.num_steps, request.guidance_scale,
+                request.t_shift, request.speed, request.return_smooth,
+            )
+        except torch.cuda.OutOfMemoryError:
+            _cleanup_gpu_memory()
+            raise HTTPException(
+                status_code=507,
+                detail=f"CUDA OOM on chunk {i+1}/{len(chunks)} "
+                       f"({len(chunk_text)} chars). Try reducing max_chunk_chars "
+                       f"(current: {request.max_chunk_chars}) or shorter text.",
+            )
         if chunk_audio.ndim > 1:
             chunk_audio = chunk_audio.squeeze()
         yield chunk_audio, i, len(chunks)
@@ -450,7 +461,20 @@ async def create_speech(request: TTSRequest):
     voice_file = _find_voice_file(request.voice)
 
     if request.stream:
-        return await create_speech_stream(request)
+        async def audio_generator():
+            for chunk_audio, idx, total in _generate_audio_chunks(request, voice_file):
+                pcm_bytes = (chunk_audio * 32767).clip(-32768, 32767).astype(np.int16).tobytes()
+                yield pcm_bytes
+
+        return StreamingResponse(
+            audio_generator(),
+            media_type="audio/pcm",
+            headers={
+                "X-Sample-Rate": str(SAMPLE_RATE),
+                "X-Format": "s16le",
+                "X-Channels": "1",
+            },
+        )
 
     try:
         audio_numpy = _generate_audio(request, voice_file)
@@ -478,29 +502,23 @@ async def create_speech_stream(request: TTSRequest):
 
     voice_file = _find_voice_file(request.voice)
 
-    fmt = request.response_format
-    content_type = "audio/wav" if fmt == "wav" else "audio/mpeg" if fmt == "mp3" else "audio/pcm"
-
     async def audio_generator():
-        chunks = _chunk_text(request.input, request.max_chunk_chars)
-        fade_samples = int(CROSSFADE_DURATION * SAMPLE_RATE)
-        audio_chunks: list[np.ndarray] = []
-
         for chunk_audio, idx, total in _generate_audio_chunks(request, voice_file):
-            audio_chunks.append(chunk_audio)
+            pcm_bytes = (chunk_audio * 32767).clip(-32768, 32767).astype(np.int16).tobytes()
+            print(f"[TTS Stream] Sending chunk {idx+1}/{total}: "
+                  f"{len(pcm_bytes)} bytes PCM, "
+                  f"duration={len(chunk_audio)/SAMPLE_RATE:.2f}s")
+            yield pcm_bytes
 
-            # For streaming: if this is the last chunk, cross-fade all and send
-            # For intermediate chunks: accumulate silently
-            if idx == total - 1:
-                # Final chunk — cross-fade everything together
-                result = _crossfade_numpy(audio_chunks, fade_samples)
-                audio_data, _ = _encode_audio(result, fmt)
-                chunk_size = 8192
-                for i in range(0, len(audio_data), chunk_size):
-                    yield audio_data[i:i + chunk_size]
-            # Intermediate chunks: nothing to yield yet (accumulate for cross-fade)
-
-    return StreamingResponse(audio_generator(), media_type=content_type)
+    return StreamingResponse(
+        audio_generator(),
+        media_type="audio/pcm",
+        headers={
+            "X-Sample-Rate": str(SAMPLE_RATE),
+            "X-Format": "s16le",
+            "X-Channels": "1",
+        },
+    )
 
 
 @app.post("/audio/speech/stream")
