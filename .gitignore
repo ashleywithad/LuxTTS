@@ -203,3 +203,5 @@ voice_samples/peaks/
 # Keep example .env but ignore actual config
 .env
 .env.local
+# BUT track Docker example template (no secrets, just defaults)
+!.env.docker.example

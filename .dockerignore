@@ -1,0 +1,126 @@
+# Dockerignore - Exclude files from Docker build context
+# =============================================================================
+# WHAT: List of files/directories to exclude from Docker image build
+# WHAT IT DOES: Reduces build time and image size by skipping unnecessary files
+# WHY: Clean image, faster builds, no sensitive data in container
+# =============================================================================
+
+# Virtual environment - rebuilt inside container, don't copy host's
+# WHY: Host venv may have wrong platform binaries (Windows vs Linux)
+.venv/
+venv/
+env/
+ENV/
+
+# Git repository - not needed in container, reduces build context size
+# WHY: Git data is for development, not production container
+.git/
+.gitignore
+.gitattributes
+
+# Python cache files - regenerated in container
+# WHY: Host cache may be incompatible, adds unnecessary size
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# IDE/Editor files - development tools not needed in container
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Kilo configuration - AI assistant files, not needed in container
+.kilo/
+.kilocode/
+.opencode/
+
+# Logs - don't copy host logs into container
+# WHY: Container generates its own logs via Docker logging driver
+*.log
+server_stdout.log
+server_stderr.log
+
+# OS-specific files - unnecessary in container
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# Build artifacts - not needed in runtime container
+dist/
+build/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Test files - not needed in production container
+tests/
+test/
+*.test.py
+test_*.py
+
+# Temporary files - don't pollute container with temp data
+temp/
+tmp/
+*.tmp
+*.bak
+
+# Output files - user-generated audio, don't copy into image
+output_speech.wav
+test.wav
+test_docker.wav
+*.wav
+*.mp3
+
+# User data directories - mounted at runtime, not copied
+# WHY: Bind mounts allow users to modify without rebuilding
+# voice_samples/ is intentionally NOT ignored - we need placeholder
+# But user audio files inside it should not be copied
+voice_samples/*.wav
+voice_samples/*.mp3
+voice_samples/peaks/
+
+# Environment files - mounted at runtime, not copied
+# WHY: .env contains secrets/settings, mount allows easy changes
+.env
+.env.local
+.env.docker
+
+# Documentation - not needed in runtime container
+docs/
+*.md
+!README.md  # Keep README for container metadata
+
+# License - metadata only, not needed for runtime
+LICENSE
+
+# Client examples - development/testing, not production
+client_example.py
+
+# Batch scripts - Windows-specific, not needed in Linux container
+*.bat
+start_server.bat
+start_server_fp16.bat
+
+# Pyproject - build metadata, pip uses requirements.txt
+pyproject.toml
+
+# AGENTS.md - AI assistant notes, not needed in container
+AGENTS.md

@@ -1,0 +1,99 @@
+# LuxTTS Docker Compose Configuration
+# =============================================================================
+# WHAT: Container orchestration for LuxTTS API server
+# WHAT IT DOES: Manages LuxTTS container with GPU access, bind mounts, health checks
+# WHY: Provides production-ready deployment with persistent cache and easy config
+# =============================================================================
+
+services:
+  luxtts:
+    # Build from local Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    # Container name for easy identification
+    container_name: luxtts-api
+    
+    # Port mapping: Host port -> Container port
+    # Default 8000, change via PORT in .env
+    ports:
+      - "${PORT:-8000}:8000"
+    
+    # Bind mounts for user data and configuration
+    # WHY BIND MOUNTS: Allows changes without rebuilding image
+    volumes:
+      # Voice samples directory - users add/modify voices here
+      # rw: Read-write (users can add files)
+      - ./voice_samples:/app/voice_samples
+      
+      # Environment configuration - mounted read-only for security
+      # WHY RO: Prevents accidental modification from inside container
+      - ./.env:/app/.env:ro
+      
+      # HuggingFace model cache - named volume for persistence
+      # WHY NAMED VOLUME: Prevents re-downloading ~1-2GB model on container recreate
+      - hf_cache:/root/.cache/huggingface
+    
+    # Environment variables (override defaults from Dockerfile)
+    # Values come from mounted .env file, these are fallbacks
+    environment:
+      - MODEL_PATH=${MODEL_PATH:-YatharthS/LuxTTS}
+      - DEVICE=${DEVICE:-cuda}
+      - HOST=0.0.0.0
+      - PORT=8000
+      - ENABLE_TF32=${ENABLE_TF32:-true}
+      - ENABLE_FP16=${ENABLE_FP16:-false}
+      - DEFAULT_RMS=${DEFAULT_RMS:-0.001}
+      - DEFAULT_T_SHIFT=${DEFAULT_T_SHIFT:-0.5}
+      - DEFAULT_NUM_STEPS=${DEFAULT_NUM_STEPS:-4}
+      - DEFAULT_SPEED=${DEFAULT_SPEED:-1.0}
+      - DEFAULT_RETURN_SMOOTH=${DEFAULT_RETURN_SMOOTH:-false}
+      - DEFAULT_REF_DURATION=${DEFAULT_REF_DURATION:-3}
+      # Optional: HuggingFace token for private models (set in .env if needed)
+      - HF_TOKEN=${HF_TOKEN:-}
+    
+    # GPU configuration using Docker Compose deploy specification
+    # WHY THIS FORMAT: Standard Docker Compose v3 syntax for GPU reservations
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1  # Use 1 GPU (set to 'all' for multi-GPU)
+              capabilities: [gpu]
+    
+    # Health check configuration
+    # WHY: Docker Compose monitors health and can restart unhealthy containers
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s       # Check every 30 seconds
+      timeout: 10s        # Wait 10 seconds for response
+      retries: 3          # 3 failures = unhealthy
+      start_period: 120s  # 120s grace period for model download
+    
+    # Restart policy: Automatically restart unless manually stopped
+    # WHY: Ensures service availability after crashes or host reboot
+    restart: unless-stopped
+    
+    # Logging configuration
+    # WHY: Prevents unbounded log growth, easy debugging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"   # Max 10MB per log file
+        max-file: "3"     # Keep 3 log files (30MB total)
+
+# Named volumes for persistent data
+# WHY NAMED VOLUMES: Docker-managed, persists across container recreates
+volumes:
+  # HuggingFace cache volume
+  # Contains downloaded model weights (~1-2GB)
+  # Prevents re-download on every container rebuild
+  hf_cache:
+    driver: local
+
+# Network configuration (optional, uses default if omitted)
+# networks:
+#   luxtts_net:
+#     driver: bridge
