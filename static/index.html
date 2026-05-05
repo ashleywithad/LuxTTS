@@ -633,6 +633,23 @@
         let streamAbortController = null;
         let nextStartTime = 0;
 
+        function getMemUsage() {
+            if (performance.memory) {
+                const used = performance.memory.usedJSHeapSize / (1024 * 1024);
+                const total = performance.memory.totalJSHeapSize / (1024 * 1024);
+                const limit = performance.memory.jsHeapSizeLimit / (1024 * 1024);
+                return { used: used.toFixed(1), total: total.toFixed(1), limit: limit.toFixed(1), pct: ((used / limit) * 100).toFixed(0) };
+            }
+            return null;
+        }
+
+        function checkMemAndWarn() {
+            const mem = getMemUsage();
+            if (mem && parseInt(mem.pct) > 80) {
+                console.warn(`[LuxTTS] Browser memory: ${mem.used}MB / ${mem.limit}MB (${mem.pct}%)`);
+            }
+        }
+
         async function checkStatus() {
             try {
                 const response = await fetch(`${API_BASE}/health`);
@@ -766,14 +783,21 @@
         }
 
         function pcmToAudioBuffer(audioCtx, pcmBytes) {
-            const int16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength / 2);
-            const float32 = new Float32Array(int16.length);
-            for (let i = 0; i < int16.length; i++) {
-                float32[i] = int16[i] / 32768;
+            try {
+                const int16 = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength / 2);
+                const float32 = new Float32Array(int16.length);
+                for (let i = 0; i < int16.length; i++) {
+                    float32[i] = int16[i] / 32768;
+                }
+                const buffer = audioCtx.createBuffer(1, float32.length, STREAM_SAMPLE_RATE);
+                buffer.copyToChannel(float32, 0);
+                return buffer;
+            } catch (e) {
+                if (e.name === 'InternalError' || e.message.includes('out of memory') || e.message.includes('storage')) {
+                    throw new Error(`Browser out of memory while decoding audio chunk. Try shorter text or disable Live Streaming.`);
+                }
+                throw e;
             }
-            const buffer = audioCtx.createBuffer(1, float32.length, STREAM_SAMPLE_RATE);
-            buffer.copyToChannel(float32, 0);
-            return buffer;
         }
 
         function stopPlayback() {
@@ -789,7 +813,15 @@
                 currentAudioCtx.close();
                 currentAudioCtx = null;
             }
+            nextStartTime = 0;
             setGenerating(false);
+        }
+
+        function releasePlayedSource(source) {
+            const idx = scheduledSources.indexOf(source);
+            if (idx !== -1) {
+                scheduledSources.splice(idx, 1);
+            }
         }
 
         async function generateSpeechStream(requestBody) {
@@ -846,7 +878,10 @@
                         source.start(startTime);
                         nextStartTime = startTime + audioBuffer.duration;
                         scheduledSources.push(source);
+                        source.onended = () => releasePlayedSource(source);
                         playedChunks++;
+
+                        if (playedChunks % 5 === 0) checkMemAndWarn();
 
                         const pct = Math.min(90, (playedChunks / estimatedChunks) * 100);
                         updateProgress(playedChunks, estimatedChunks, pct);
@@ -864,6 +899,7 @@
                     const startTime = Math.max(currentAudioCtx.currentTime, nextStartTime);
                     source.start(startTime);
                     scheduledSources.push(source);
+                    source.onended = () => releasePlayedSource(source);
                     playedChunks++;
                 }
 
@@ -872,7 +908,10 @@
 
                 const lastSource = scheduledSources[scheduledSources.length - 1];
                 if (lastSource) {
+                    const originalOnended = lastSource.onended;
                     lastSource.onended = () => {
+                        releasePlayedSource(lastSource);
+                        if (originalOnended) originalOnended();
                         setGenerating(false);
                     };
                 } else {
@@ -886,13 +925,19 @@
                 if (error.name === 'AbortError') {
                     return;
                 }
-                alert(`Error: ${error.message}`);
-                setGenerating(false);
+                const memInfo = getMemUsage();
+                const memStr = memInfo ? ` (Browser memory: ${memInfo.used}MB / ${memInfo.limit}MB, ${memInfo.pct}% used)` : '';
+                if (error.name === 'InternalError' || error.message.includes('out of memory') || error.message.includes('storage')) {
+                    alert(`Out of memory!${memStr}\n\nThe audio was too long for browser memory. Try:\n• Shorter text\n• Use non-streaming mode (toggle Live Streaming OFF)\n• Close other tabs to free browser memory`);
+                } else {
+                    alert(`Error: ${error.message}${memStr}`);
+                }
+                stopPlayback();
             }
         }
 
         function MAX_PLAY_SAMPLES() {
-            return STREAM_SAMPLE_RATE * 10;
+            return STREAM_SAMPLE_RATE * 5;
         }
 
         function appendBuffer(existing, newData) {
