@@ -15,6 +15,13 @@ services:
     # Container name for easy identification
     container_name: luxtts-api
     
+    # WHAT: Shared memory size for PyTorch/CUDA operations
+    # WHAT IT DOES: Increases /dev/shm from default 64MB to 2GB
+    # WHY: PyTorch DataLoader + CUDA allocator need >64MB shared memory
+    #      Default 64MB causes allocator corruption on GPU inference
+    #      Same settings work on host because host has full system RAM for /dev/shm
+    shm_size: '2gb'
+    
     # Port mapping: Host port -> Container port
     # Default 8000, change via PORT in .env
     ports:
@@ -50,8 +57,18 @@ services:
       - DEFAULT_SPEED=${DEFAULT_SPEED:-1.0}
       - DEFAULT_RETURN_SMOOTH=${DEFAULT_RETURN_SMOOTH:-false}
       - DEFAULT_REF_DURATION=${DEFAULT_REF_DURATION:-3}
+      # WHAT: Auto-restart when CUDA allocator corruption detected
+      # WHAT IT DOES: Forces process exit on corruption, Docker restart policy brings it back
+      # WHY: Prevents manual intervention when allocator is broken from previous OOM
+      #      Set to false if you want 503 errors instead of auto-restart
+      - AUTO_RESTART_ON_CORRUPTION=${AUTO_RESTART_ON_CORRUPTION:-true}
       # Optional: HuggingFace token for private models (set in .env if needed)
       - HF_TOKEN=${HF_TOKEN:-}
+      # WHAT: PyTorch CUDA allocator configuration
+      # WHAT IT DOES: Prevents memory fragmentation, enables garbage collection threshold
+      # WHY: Critical for low-VRAM GPUs - prevents OOM spikes during diffusion inference
+      #      expandable_segments not supported on Windows but IS supported in Linux container
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.6,expandable_segments:True
     
     # GPU configuration using Docker Compose deploy specification
     # WHY THIS FORMAT: Standard Docker Compose v3 syntax for GPU reservations

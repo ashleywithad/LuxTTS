@@ -28,8 +28,20 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # =============================================================================
-# STAGE 1: Install Python dependencies
-# WHY FIRST: Better layer caching - dependencies change less than code
+# STAGE 1: Install system dependencies
+# WHY FIRST: Runtime image lacks git/curl needed for pip install and healthcheck
+# =============================================================================
+
+# Install git (for GitHub pip dependencies) and curl (for healthcheck)
+# --no-install-recommends: Minimal install, reduces image size
+# && rm -rf: Clean apt cache to keep image small
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# =============================================================================
+# STAGE 2: Install Python dependencies
+# WHY SECOND: Better layer caching - dependencies change less than code
 # =============================================================================
 
 # Copy requirements file first (for layer caching)
@@ -44,8 +56,8 @@ RUN pip install --no-cache-dir --find-links https://k2-fsa.github.io/icefall/pip
     pip install --no-cache-dir "zipvoice @ git+https://github.com/ysharma3501/LuxTTS.git"
 
 # =============================================================================
-# STAGE 2: Copy application code
-# WHY SECOND: Code changes more frequently, separate layer for faster rebuilds
+# STAGE 3: Copy application code
+# WHY THIRD: Code changes more frequently, separate layer for faster rebuilds
 # =============================================================================
 
 # Copy only necessary application files
@@ -60,7 +72,7 @@ COPY static/ ./static/
 RUN mkdir -p voice_samples
 
 # =============================================================================
-# STAGE 3: Configure container
+# STAGE 4: Configure container
 # =============================================================================
 
 # Expose default port (can be overridden via PORT env var)
@@ -75,7 +87,7 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # =============================================================================
-# STAGE 4: Runtime configuration
+# STAGE 5: Runtime configuration
 # =============================================================================
 
 # Default environment variables (can be overridden via .env or docker-compose)

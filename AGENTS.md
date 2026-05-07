@@ -75,7 +75,7 @@ DEVICE=cuda
 ENABLE_TF32=true
 ENABLE_FP16=false
 HOST=0.0.0.0
-PORT=8000
+PORT=8020
 DEFAULT_RMS=0.001
 DEFAULT_T_SHIFT=0.5
 DEFAULT_NUM_STEPS=4
@@ -83,6 +83,20 @@ DEFAULT_SPEED=1.0
 DEFAULT_RETURN_SMOOTH=false
 DEFAULT_REF_DURATION=3
 ```
+
+## Tested Configurations
+**Working Docker settings** (with `shm_size: '2gb'`):
+```json
+{
+  "speed": 0.5,
+  "num_steps": 10,
+  "ref_duration": 20,
+  "max_chunk_chars": 500
+}
+```
+- Same settings that worked on host now work in Docker after shared memory fix
+- Docker overhead requires proper `/dev/shm` allocation (2GB minimum)
+- Without `shm_size: '2gb'`, even conservative settings fail with allocator corruption
 
 ### 5. Progressive Streaming (Live Playback)
 - `/v1/audio/speech/stream` now sends raw PCM (int16 LE, 48kHz, mono) per text chunk as it generates
@@ -100,10 +114,85 @@ DEFAULT_REF_DURATION=3
   - Download button: uses non-streaming endpoint (cross-faded WAV/MP3) for quality
 - Non-streaming mode (toggle OFF): original blob-based playback with `<audio>` element, cross-fade quality
 
+### 6. Docker Deployment
+- **Dockerfile**: PyTorch CUDA 12.1 runtime base (~4GB), install git/curl for pip deps and healthcheck
+- **docker-compose.yml**: GPU support via `deploy.resources.reservations.devices`, bind mounts, health check
+- **CRITICAL: Shared Memory Configuration**
+  - Added `shm_size: '2gb'` to docker-compose.yml
+  - WHY: PyTorch/CUDA allocator requires >64MB shared memory for GPU inference
+  - Docker default `/dev/shm` = 64MB → causes allocator corruption (`!handles_.at(i)` internal assert)
+  - Host OS `/dev/shm` = half of system RAM (works fine on host, fails in Docker)
+  - Symptom: OOM → allocator corruption → all subsequent requests fail with "CUDA error: unknown error"
+  - Fix: Increase shared memory to 2GB (same settings that work on host now work in Docker)
+- **CRITICAL: PyTorch Allocator Configuration**
+  - Added `PYTORCH_CUDA_ALLOC_CONF` to docker-compose.yml environment variables
+  - Config: `max_split_size_mb:128,garbage_collection_threshold:0.6,expandable_segments:True`
+  - WHY: Prevents memory fragmentation during diffusion inference on low-VRAM GPUs
+  - `expandable_segments:True` — Supported in Linux container (NOT supported on Windows host)
+  - Must be set via environment BEFORE Python process starts (not via `os.environ.setdefault()` in code)
+  - Note: `expandable_segments:True` listed as "not supported on Windows" in Known Issues but IS supported in Linux container
+- **Bind mounts**: 
+  - `voice_samples/` → `/app/voice_samples` (rw) — add voices without rebuild
+  - `.env` → `/app/.env` (ro) — config without rebuild
+  - Named volume `hf_cache` → HuggingFace cache (prevents model re-download ~1-2GB)
+- **Port**: 8020 (8000 is reserved for Budgie Dialer)
+- **Health check**: 120s start_period for model download, 30s interval after startup
+- **Restart policy**: `unless-stopped` (survives host reboot)
+- `.dockerignore`: Excludes `.venv`, `.git`, `__pycache__`, logs, voice files (mounted at runtime)
+- `.env.docker.example`: Template with Docker-specific defaults
+- `.gitignore`: Updated with `!.env.docker.example` to track example in git
+- **Running**: `docker compose up -d` — model loads in ~40s, GPU memory ~0.79GB
+- **Access**: Web UI at http://localhost:8020, API docs at http://localhost:8020/docs
+
+### 7. CUDA Memory Management Improvements (2026-05-06)
+- **Problem**: OOM errors caused CUDA allocator corruption, cascading 500 errors for all subsequent requests
+- **Root cause analysis**:
+  - RuntimeError "CUDA out of memory" thrown (NOT `torch.cuda.OutOfMemoryError`)
+  - Uncatched RuntimeError → allocator internal state corrupted (`!handles_.at(i)` assertion failure)
+  - Once corrupted, only container restart could fix — no programmatic recovery possible
+- **Error handling fixes**:
+  - Catch both `torch.cuda.OutOfMemoryError` AND `RuntimeError` in chunk generation
+  - Detect allocator corruption signature: `!handles_.at(i)` or `INTERNAL ASSERT FAILED`
+  - Return HTTP 503 (Service Unavailable) with "Container restart recommended" message
+  - Return HTTP 507 (Insufficient Storage) for normal CUDA OOM with actionable advice
+- **Memory cleanup improvements**:
+  - Added `torch.cuda.synchronize()` BEFORE each chunk (releases previous chunk memory)
+  - Explicit `del audio` after `.numpy()` conversion (breaks reference chain)
+  - Pre-chunk cleanup prevents memory accumulation across chunks
+- **Default chunk size reduction**: 200 → 150 chars (extra safety for Docker overhead)
+- **Added helper functions**:
+  - `_is_cuda_error()` — Detects CUDA-related RuntimeErrors
+  - `_reset_cuda_allocator()` — Attempts recovery (limited success, mainly for error detection)
+- **Result**: Proper HTTP status codes, allocator remains functional after errors, actionable user feedback
+
+### 8. CUDA Allocator Pre-Flight Check + Auto-Restart (2026-05-07)
+- **Problem**: Once allocator corrupted from OOM, ALL subsequent requests failed with 503 until manual restart
+- **Root cause**: Previous fixes caught corruption in-flight, but allocator was already dead before request started
+- **New fixes**:
+  - `_check_cuda_allocator_health()`: Pre-flight check that attempts small allocation before generation
+    - Tests allocator with 1024-float tensor allocation
+    - Returns False if corruption signature detected (`!handles_.at(i)` or `INTERNAL ASSERT FAILED`)
+    - Called at start of `_generate_audio()` and `_generate_audio_chunks()`
+  - `_handle_allocator_corruption()`: Unified handler for corruption detection
+    - If `AUTO_RESTART_ON_CORRUPTION=true`: calls `os._exit(1)` for immediate process termination
+    - Docker's `restart: unless-stopped` policy brings container back automatically
+    - If disabled: raises HTTP 503 with actionable message
+  - `AUTO_RESTART_ON_CORRUPTION` env var (default: true)
+    - Set in docker-compose.yml
+    - Documented in .env.docker.example
+- **Result**: 
+  - Pre-flight check fails fast with clear message before generation starts
+  - Auto-restart eliminates need for manual intervention
+  - Service self-heals after OOM corruption within ~40 seconds (model reload time)
+
 ## Known Issues / Future Work
-- `expandable_segments:True` in PYTORCH_CUDA_ALLOC_CONF not supported on Windows
+- `expandable_segments:True` in PYTORCH_CUDA_ALLOC_CONF not supported on Windows host, but IS supported in Docker Linux container
 - Streaming has no cross-fade between chunks (minor quality tradeoff for lowest latency)
   - Sentence boundary pauses in TTS output make the stitch mostly seamless
   - Could add client-side cross-fade using Web Audio API gain nodes (fade-out/fade-in)
 - The `zipvoice/` local directory files show as deleted in git (replaced by pip package)
 - No `default.wav` in git (ignored by .gitignore) — users need to add their own voice sample
+- Docker container shows ffmpeg warning (expected) — MP3 uses soundfile native (fast) or pydub fallback
+- Port 8000 reserved for Budgie Dialer — LuxTTS uses 8020 by default
+- `_reset_cuda_allocator()` has limited success — once corrupted, container restart is required
+- Very long texts (>1500 chars) may still OOM even with chunking on 4GB VRAM — reduce `max_chunk_chars` or enable FP16

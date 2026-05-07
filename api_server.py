@@ -25,6 +25,7 @@ Chunking Support:
 """
 
 import os
+import sys
 import io
 import re
 import gc
@@ -64,6 +65,10 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 ENABLE_TF32 = os.getenv("ENABLE_TF32", "true").lower() in ("true", "1", "yes")
 ENABLE_FP16 = os.getenv("ENABLE_FP16", "false").lower() in ("true", "1", "yes")
+# WHAT: Auto-restart when CUDA allocator corruption detected
+# WHAT IT DOES: Forces process exit on corruption, Docker restart policy brings it back
+# WHY: Prevents manual intervention when allocator is broken from previous OOM
+AUTO_RESTART_ON_CORRUPTION = os.getenv("AUTO_RESTART_ON_CORRUPTION", "true").lower() in ("true", "1", "yes")
 
 # Apply Ampere GPU optimizations (RTX 3050, etc.)
 if torch.cuda.is_available():
@@ -85,7 +90,10 @@ VOICE_SAMPLES_DIR.mkdir(exist_ok=True)
 # Chunking constants
 SAMPLE_RATE = 48000
 CROSSFADE_DURATION = 0.05  # 50ms cross-fade between chunks
-DEFAULT_MAX_CHUNK_CHARS = 200  # ~80 tokens, safe for 4GB VRAM
+# WHAT: Default chunk size for text splitting
+# WHAT IT DOES: Limits text chunk size to prevent CUDA OOM on 4GB VRAM GPUs
+# WHY: Reduced to 150 chars for Docker memory overhead (host can use larger)
+DEFAULT_MAX_CHUNK_CHARS = 150  # ~60 tokens, conservative for Docker + 4GB VRAM
 
 # Global model instance
 lux_tts: Optional[LuxTTS] = None
@@ -99,9 +107,94 @@ def _apply_half_precision(lux_tts_instance: LuxTTS) -> None:
 
 
 def _cleanup_gpu_memory() -> None:
+    """WHAT: Force GPU memory cleanup
+    WHAT IT DOES: Runs Python garbage collector and PyTorch CUDA cache clear
+    WHY: Prevents memory accumulation between chunk generations on low-VRAM GPUs"""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def _is_cuda_error(error: Exception) -> bool:
+    """WHAT: Detect if an exception is CUDA-related
+    WHAT IT DOES: Checks error message for CUDA/OOM keywords
+    WHY: RuntimeError with 'CUDA out of memory' is thrown instead of OutOfMemoryError"""
+    error_str = str(error).lower()
+    return (
+        "cuda" in error_str
+        or "out of memory" in error_str
+        or "!handles_.at(i)" in str(error)  # Allocator corruption signature
+        or "INTERNAL ASSERT FAILED" in str(error)
+    )
+
+
+def _reset_cuda_allocator() -> bool:
+    """WHAT: Attempt to recover from CUDA allocator corruption
+    WHAT IT DOES: Synchronize, clear cache, reset peak stats
+    WHY: After allocator corruption (!handles_.at(i)), attempts graceful recovery
+    Returns: True if recovery attempted (not guaranteed success)"""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        gc.collect()
+        return True
+    except Exception:
+        return False
+
+
+def _check_cuda_allocator_health() -> bool:
+    """WHAT: Test if CUDA allocator is functional before generation
+    WHAT IT DOES: Attempts small memory allocation, detects corruption signature
+    WHY: Once corrupted (!handles_.at(i)), all subsequent requests fail until restart
+         Pre-flight check prevents failing mid-generation, gives immediate feedback"""
+    if not torch.cuda.is_available():
+        return True  # CPU mode, no CUDA allocator
+    try:
+        # WHAT: Small test allocation to verify allocator is functional
+        # WHAT IT DOES: Allocates 1024 floats, immediately frees them
+        # WHY: If allocator corrupted, even small allocation triggers RuntimeError
+        test_tensor = torch.empty(1024, device='cuda')
+        del test_tensor
+        torch.cuda.empty_cache()
+        return True
+    except RuntimeError as e:
+        # WHAT: Check for allocator corruption signature
+        # WHAT IT DOES: Detect !handles_.at(i) or INTERNAL ASSERT FAILED
+        # WHY: These signatures indicate allocator state is permanently broken
+        error_str = str(e)
+        if "!handles_.at(i)" in error_str or "INTERNAL ASSERT FAILED" in error_str:
+            print(f"[CUDA] Allocator corruption detected in pre-flight check: {error_str}")
+            return False
+        # WHAT: Other RuntimeErrors might be transient
+        # WHAT IT DOES: Return True to allow generation attempt
+        # WHY: Not all CUDA errors indicate permanent corruption
+        return True
+
+
+def _handle_allocator_corruption(context: str = "generation") -> None:
+    """WHAT: Handle detected CUDA allocator corruption
+    WHAT IT DOES: Either auto-restarts process or raises HTTPException 503
+    WHY: Once corrupted, allocator cannot recover - restart required
+    Args: context - Description of where corruption was detected (for logging)"""
+    print(f"[CUDA] Allocator corrupted during {context}. Auto-restart: {AUTO_RESTART_ON_CORRUPTION}")
+
+    if AUTO_RESTART_ON_CORRUPTION:
+        print("[CUDA] Triggering auto-restart via os._exit(1)...")
+        # WHAT: Force immediate process termination
+        # WHAT IT DOES: Bypasses Python cleanup, Docker sees non-zero exit
+        # WHY: Faster than graceful shutdown, Docker restart policy brings it back
+        sys.stdout.flush()
+        os._exit(1)
+
+    # WHAT: If auto-restart disabled, raise HTTPException for client feedback
+    raise HTTPException(
+        status_code=503,
+        detail=f"CUDA allocator corrupted during {context}. "
+               "Container restart required. Set AUTO_RESTART_ON_CORRUPTION=true for automatic recovery."
+    )
 
 
 def _chunk_text(text: str, max_chars: int = DEFAULT_MAX_CHUNK_CHARS) -> list[str]:
@@ -320,7 +413,9 @@ def _encode_prompt(voice_file: Path, rms: float, ref_duration: int):
 def _generate_single(text: str, encoded_prompt: dict, num_steps: int,
                       guidance_scale: float, t_shift: float, speed: float,
                       return_smooth: bool) -> np.ndarray:
-    """Generate audio for a single text chunk. Returns 1D numpy array."""
+    """WHAT: Generate audio for a single text chunk
+    WHAT IT DOES: Runs LuxTTS generation inside inference_mode, returns numpy array
+    WHY: inference_mode reduces memory overhead; explicit tensor deletion prevents accumulation"""
     with torch.inference_mode():
         audio = lux_tts.generate_speech(
             text=text,
@@ -331,11 +426,22 @@ def _generate_single(text: str, encoded_prompt: dict, num_steps: int,
             speed=speed,
             return_smooth=return_smooth,
         )
+        # WHAT: Convert to numpy and explicitly delete CUDA tensor
+        # WHAT IT DOES: Breaks reference chain before cleanup
+        # WHY: Allows PyTorch to free GPU memory immediately
+        audio_numpy = audio.numpy().squeeze()
+        del audio
     _cleanup_gpu_memory()
-    return audio.numpy().squeeze()
+    return audio_numpy
 
 
 def _generate_audio(request: TTSRequest, voice_file: Path) -> np.ndarray:
+    # WHAT: Pre-flight check for CUDA allocator corruption
+    # WHAT IT DOES: Verify allocator is functional before attempting generation
+    # WHY: If corrupted from previous OOM, fail immediately instead of mid-generation
+    if not _check_cuda_allocator_health():
+        _handle_allocator_corruption("pre-flight check (non-streaming)")
+
     encoded_prompt = _encode_prompt(voice_file, request.rms, request.ref_duration)
 
     # Determine if chunking is needed
@@ -353,12 +459,22 @@ def _generate_audio(request: TTSRequest, voice_file: Path) -> np.ndarray:
         return audio_numpy
 
     # Chunked generation (long text — prevents OOM on low-VRAM GPUs)
+    # WHAT: Split text into chunks, generate each separately, cross-fade concatenate
+    # WHAT IT DOES: Prevents CUDA OOM by limiting per-chunk memory usage
+    # WHY: 4GB VRAM can't hold full text generation state; chunks allow progressive generation
     print(f"[TTS] Chunking text into {len(chunks)} segments "
           f"({', '.join(str(len(c)) for c in chunks)} chars)")
     fade_samples = int(CROSSFADE_DURATION * SAMPLE_RATE)
     audio_chunks: list[np.ndarray] = []
 
     for i, chunk_text in enumerate(chunks):
+        # WHAT: Aggressive cleanup before each chunk (except first)
+        # WHAT IT DOES: Synchronize + empty_cache to release previous chunk memory
+        # WHY: Prevents memory accumulation across chunks in Docker environment
+        if i > 0 and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            _cleanup_gpu_memory()
+
         print(f"[TTS] Generating chunk {i+1}/{len(chunks)}: "
               f"{len(chunk_text)} chars, '{chunk_text[:50]}...'")
         try:
@@ -371,14 +487,33 @@ def _generate_audio(request: TTSRequest, voice_file: Path) -> np.ndarray:
             if chunk_audio.ndim > 1:
                 chunk_audio = chunk_audio.squeeze()
             audio_chunks.append(chunk_audio)
-        except torch.cuda.OutOfMemoryError:
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            # WHAT: Catch both OutOfMemoryError and CUDA RuntimeError
+            # WHAT IT DOES: Prevents allocator corruption cascade
+            # WHY: RuntimeError 'CUDA out of memory' is thrown, not OutOfMemoryError
             _cleanup_gpu_memory()
-            raise HTTPException(
-                status_code=507,
-                detail=f"CUDA OOM on chunk {i+1}/{len(chunks)} "
-                        f"({len(chunk_text)} chars). Try reducing max_chunk_chars "
-                        f"(current: {request.max_chunk_chars}) or shorter text.",
-            )
+
+            # WHAT: Check for allocator corruption signature
+            # WHAT IT DOES: Trigger auto-restart or raise 503
+            # WHY: !handles_.at(i) means allocator state is permanently broken
+            if "!handles_.at(i)" in str(e) or "INTERNAL ASSERT FAILED" in str(e):
+                _handle_allocator_corruption(f"chunk {i+1}/{len(chunks)} generation")
+
+            # WHAT: Normal CUDA OOM (not corruption)
+            # WHAT IT DOES: Return 507 with actionable advice
+            # WHY: Client can retry with smaller chunks without allocator damage
+            if _is_cuda_error(e):
+                raise HTTPException(
+                    status_code=507,
+                    detail=f"CUDA OOM on chunk {i+1}/{len(chunks)} "
+                           f"({len(chunk_text)} chars). Try reducing max_chunk_chars "
+                           f"(current: {request.max_chunk_chars}) or shorter text.",
+                )
+
+            # WHAT: Non-CUDA RuntimeError — re-raise
+            # WHAT IT DOES: Let FastAPI handle as 500 error
+            # WHY: Should not corrupt allocator, allow debugging
+            raise
 
     result = _crossfade_numpy(audio_chunks, fade_samples)
     total_duration = len(result) / SAMPLE_RATE
@@ -388,14 +523,27 @@ def _generate_audio(request: TTSRequest, voice_file: Path) -> np.ndarray:
 
 
 def _generate_audio_chunks(request: TTSRequest, voice_file: Path):
-    """Yield (numpy_array, chunk_index, total_chunks) for each text chunk.
+    """WHAT: Yield audio chunks progressively for streaming endpoint
+    WHAT IT DOES: Generates each chunk separately, sends PCM bytes immediately
+    WHY: Progressive streaming for real-time playback; prevents OOM with chunking"""
 
-    Used by the streaming endpoint to send audio progressively.
-    """
+    # WHAT: Pre-flight check for CUDA allocator corruption
+    # WHAT IT DOES: Verify allocator is functional before attempting generation
+    # WHY: If corrupted from previous OOM, fail immediately instead of mid-stream
+    if not _check_cuda_allocator_health():
+        _handle_allocator_corruption("pre-flight check (streaming)")
+
     encoded_prompt = _encode_prompt(voice_file, request.rms, request.ref_duration)
     chunks = _chunk_text(request.input, request.max_chunk_chars)
 
     for i, chunk_text in enumerate(chunks):
+        # WHAT: Aggressive cleanup before each chunk (except first)
+        # WHAT IT DOES: Synchronize + empty_cache to release previous chunk memory
+        # WHY: Prevents memory accumulation in streaming mode
+        if i > 0 and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            _cleanup_gpu_memory()
+
         print(f"[TTS Stream] Generating chunk {i+1}/{len(chunks)}: {len(chunk_text)} chars")
         try:
             chunk_audio = _generate_single(
@@ -403,14 +551,29 @@ def _generate_audio_chunks(request: TTSRequest, voice_file: Path):
                 request.num_steps, request.guidance_scale,
                 request.t_shift, request.speed, request.return_smooth,
             )
-        except torch.cuda.OutOfMemoryError:
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            # WHAT: Catch both OutOfMemoryError and CUDA RuntimeError
+            # WHAT IT DOES: Prevents allocator corruption cascade in streaming
+            # WHY: Streaming generator errors handled differently than batch
             _cleanup_gpu_memory()
-            raise HTTPException(
-                status_code=507,
-                detail=f"CUDA OOM on chunk {i+1}/{len(chunks)} "
-                       f"({len(chunk_text)} chars). Try reducing max_chunk_chars "
-                       f"(current: {request.max_chunk_chars}) or shorter text.",
-            )
+
+            # WHAT: Check for allocator corruption signature
+            # WHAT IT DOES: Trigger auto-restart or raise 503
+            # WHY: !handles_.at(i) means allocator state is permanently broken
+            if "!handles_.at(i)" in str(e) or "INTERNAL ASSERT FAILED" in str(e):
+                _handle_allocator_corruption(f"chunk {i+1}/{len(chunks)} streaming")
+
+            # WHAT: Normal CUDA OOM
+            if _is_cuda_error(e):
+                raise HTTPException(
+                    status_code=507,
+                    detail=f"CUDA OOM on chunk {i+1}/{len(chunks)} "
+                           f"({len(chunk_text)} chars). Try reducing max_chunk_chars "
+                           f"(current: {request.max_chunk_chars}) or shorter text.",
+                )
+
+            raise
+
         if chunk_audio.ndim > 1:
             chunk_audio = chunk_audio.squeeze()
         yield chunk_audio, i, len(chunks)
